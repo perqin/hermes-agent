@@ -504,6 +504,7 @@ from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
+from tools.environments.coder import CoderEnvironment as _CoderEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -608,7 +609,7 @@ def _get_env_config() -> Dict[str, Any]:
     # is running inside the container/remote).
     if env_type == "local":
         default_cwd = os.getcwd()
-    elif env_type == "ssh":
+    elif env_type in ("ssh", "coder"):
         default_cwd = "~"
     else:
         default_cwd = "/root"
@@ -657,6 +658,10 @@ def _get_env_config() -> Dict[str, Any]:
         "ssh_user": os.getenv("TERMINAL_SSH_USER", ""),
         "ssh_port": _parse_env_var("TERMINAL_SSH_PORT", "22"),
         "ssh_key": os.getenv("TERMINAL_SSH_KEY", ""),
+        # Coder-specific config
+        "coder_url": os.getenv("CODER_URL", ""),
+        "coder_api_key": os.getenv("CODER_API_KEY", ""),
+        "coder_workspace": os.getenv("CODER_WORKSPACE", ""),
         # Persistent shell: SSH defaults to the config-level persistent_shell
         # setting (true by default for non-local backends); local is always opt-in.
         # Per-backend env vars override if explicitly set.
@@ -808,8 +813,19 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             timeout=timeout,
         )
 
+    elif env_type == "coder":
+        if not cc.get("coder_url") or not cc.get("coder_api_key") or not cc.get("coder_workspace"):
+            raise ValueError("Coder environment requires CODER_URL, CODER_API_KEY, and CODER_WORKSPACE")
+        return _CoderEnvironment(
+            base_url=cc["coder_url"],
+            workspace=cc["coder_workspace"],
+            api_key=cc["coder_api_key"],
+            cwd=cwd,
+            timeout=timeout,
+        )
+
     else:
-        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'docker', 'singularity', 'modal', 'daytona', or 'ssh'")
+        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'docker', 'singularity', 'modal', 'daytona', 'ssh', or 'coder'")
 
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
@@ -1627,10 +1643,18 @@ def check_terminal_requirements() -> bool:
             from daytona import Daytona  # noqa: F401 — SDK presence check
             return os.getenv("DAYTONA_API_KEY") is not None
 
+        elif env_type == "coder":
+            if not config.get("coder_url") or not config.get("coder_api_key") or not config.get("coder_workspace"):
+                logger.error(
+                    "Coder backend selected but CODER_URL, CODER_API_KEY, and CODER_WORKSPACE must all be set."
+                )
+                return False
+            return True
+
         else:
             logger.error(
                 "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
-                "modal, daytona, ssh.",
+                "modal, daytona, ssh, coder.",
                 env_type,
             )
             return False
