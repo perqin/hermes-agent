@@ -60,27 +60,80 @@ The biggest implementation fork depends on **how Hermes will talk to Coder**.
 
 There are two realistic models:
 
-### Option A: Coder is reached through SSH
+### Option A: Coder CLI-backed backend (recommended v1)
 
-If each Coder workspace ultimately exposes stable SSH access, the new backend can likely be implemented as a thin wrapper around the remote-shell model already used by `SSHEnvironment`.
+Use the official `coder` CLI as the transport layer, with Hermes implementing a dedicated `coder` backend that shells out to commands such as:
+
+- `coder ssh <workspace> -- bash -lc '<wrapped command>'`
+- or the equivalent non-interactive shell form Hermes needs for `_run_bash(...)`
+
+This approach intentionally reuses Coder's supported execution path rather than re-implementing its agent connectivity stack in Python. Source analysis shows `coder_workspace_bash` is functionally equivalent to `coder ssh <workspace> <command>` and ultimately executes through the workspace agent's built-in SSH server after Coder resolves the workspace, auto-starts it if needed, and waits for the agent to become ready.
 
 Implications:
 
-- lower implementation risk
-- simpler process model
-- shell/session behavior already matches Hermes expectations
-- file sync can likely reuse the SSH-style approach or avoid extra sync if Hermes operates directly in the workspace
+- fastest path to a working Hermes `coder` backend
+- lowest implementation and maintenance risk
+- inherits Coder's existing auth, workspace resolution, auto-start, and readiness behavior
+- avoids re-implementing Coder's tailnet / coordinate / agent dialing stack in Hermes
+- keeps Hermes aligned with its current environment abstraction: one backend object that executes wrapped shell commands and returns stdout/stderr/exit status
 
-### Option B: Coder is reached through an HTTP API / SDK / workspace exec API
+Trade-offs:
 
-If command execution happens through a Coder API instead of SSH, the implementation will look more like `DaytonaEnvironment`:
+- requires the user to have the `coder` CLI installed locally
+- requires the CLI to already be authenticated and able to reach the target workspace
+- process/session behavior is only as rich as what Hermes can layer on top of `coder ssh`
 
-- explicit exec calls
-- custom lifecycle handling
-- possibly custom file upload / download support
-- more care around interruption, stdout streaming, and background processes
+Recommended v1 shape:
 
-**Recommendation:** before implementation begins, explicitly decide which integration model is in scope for v1.
+- add a dedicated `CoderEnvironment` instead of pretending Coder is just generic SSH
+- let Coder own workspace lifecycle/connectivity concerns
+- let Hermes own command wrapping, cwd/session snapshots, process supervision, and tool integration
+
+### Option B: Coder is reached through the Coder HTTP/WebSocket API (`/pty`)
+
+This option implements `CoderEnvironment` without depending on the local `coder` CLI. Instead, Hermes talks directly to Coder's public APIs and uses the workspace agent PTY endpoint as the execution transport.
+
+Decision for this option:
+
+- use `GET /api/v2/workspaceagents/{workspaceagent}/pty` as the command-execution transport
+- use normal Coder API-key / session-token authentication semantics rather than requiring `coder` CLI login state
+- ignore `container` and `container_user` for v1; always execute in the workspace agent's default shell environment
+- use a Python terminal-emulation library such as `pyte` to consume PTY output and recover visible screen text for stdout-style reads
+
+Relevant Coder APIs:
+
+- `GET /api/v2/workspaces/{workspace}`: resolve the target workspace and inspect current state
+- `POST /api/v2/workspaces/{workspace}/builds`: start the workspace when it is stopped
+- `GET /api/v2/workspaces/{workspace}/watch-ws` or equivalent polling: wait until the workspace / agent is ready
+- `GET /api/v2/workspaceagents/{workspaceagent}`: resolve the target agent
+- `GET /api/v2/workspaceagents/{workspaceagent}/pty`: open the WebSocket PTY transport used for command execution
+- `GET /api/v2/workspaceagents/{workspaceagent}/logs`: optional diagnostics when startup or execution fails
+
+Protocol shape:
+
+- client -> server: JSON control messages such as `{ "data": "..." }` and `{ "height": ..., "width": ... }`
+- server -> client: raw PTY byte stream (terminal output, including ANSI control sequences)
+- the PTY stream should be parsed into a screen model with `pyte` or equivalent so Hermes can reason about visible text
+
+Implications for Hermes:
+
+- this is not a structured exec API; it is a terminal stream API
+- stdout/stderr are not natively separated by the transport, which is acceptable for Hermes terminal-backend purposes in v1
+- completion also does not need to be treated as a first-class transport capability for v1; Hermes can operate without a special completion protocol
+- exit code is the main semantic gap to validate during implementation; first verify whether PTY EOF / connection close is sufficient in the practical one-shot cases Hermes cares about, and only add extra shell-level markers if that proves necessary
+- Hermes still needs to honor caller-specified cwd even if the PTY transport does not natively model it; the fallback approach is to prefix commands with `cd <cwd> && ...`, so cwd support is not considered a blocker
+- compared with Option A, this removes the local CLI dependency but increases backend-side protocol and shell-semantic complexity
+
+Recommended v1 shape for Option B:
+
+- add a dedicated `CoderEnvironment` that manages a PTY-backed session per Hermes environment session
+- maintain a parsed screen buffer using `pyte` for readable output extraction
+- start with non-container, non-interactive command execution semantics that are compatible with Hermes `terminal`, `file_tools`, and `execute_code`
+- do not attempt stdout/stderr separation in v1
+- do not require a dedicated completion protocol in v1
+- treat exit-code capture as the main behavior to validate during development, with fallback to shell wrapping only if EOF-based detection is insufficient
+- implement cwd by command prefixing (`cd <cwd> && ...`) when needed
+- treat richer interactive PTY UX as a follow-up enhancement rather than a v1 requirement
 
 ---
 
