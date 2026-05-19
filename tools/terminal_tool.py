@@ -504,7 +504,7 @@ from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
-from tools.environments.coder import CoderEnvironment as _CoderEnvironment
+from tools.environments.coder import CoderEnvironment as _CoderEnvironment, coder_workspace_exists as _coder_workspace_exists
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -600,7 +600,18 @@ def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
-    env_type = os.getenv("TERMINAL_ENV", "local")
+    configured_env_type = ""
+    try:
+        from hermes_cli.config import load_config as _load_hermes_config
+
+        configured_env_type = str((_load_hermes_config().get("terminal") or {}).get("backend") or "").strip()
+    except Exception:
+        configured_env_type = ""
+    env_override = os.getenv("TERMINAL_ENV", "").strip()
+    if env_override and env_override.lower() != "local":
+        env_type = env_override
+    else:
+        env_type = configured_env_type or env_override or "local"
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in ("true", "1", "yes")
 
@@ -619,6 +630,13 @@ def _get_env_config() -> Dict[str, Any]:
     # /workspace and track the original host path separately. Otherwise keep the
     # normal sandbox behavior and discard host paths.
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
+    try:
+        from hermes_cli.config import get_env_value as _get_secret_env_value
+    except Exception:
+        _get_secret_env_value = os.getenv
+    coder_url = _get_secret_env_value("CODER_URL") or ""
+    coder_api_key = _get_secret_env_value("CODER_API_KEY") or ""
+    coder_workspace = _get_secret_env_value("CODER_WORKSPACE") or ""
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:
@@ -659,9 +677,9 @@ def _get_env_config() -> Dict[str, Any]:
         "ssh_port": _parse_env_var("TERMINAL_SSH_PORT", "22"),
         "ssh_key": os.getenv("TERMINAL_SSH_KEY", ""),
         # Coder-specific config
-        "coder_url": os.getenv("CODER_URL", ""),
-        "coder_api_key": os.getenv("CODER_API_KEY", ""),
-        "coder_workspace": os.getenv("CODER_WORKSPACE", ""),
+        "coder_url": coder_url,
+        "coder_api_key": coder_api_key,
+        "coder_workspace": coder_workspace,
         # Persistent shell: SSH defaults to the config-level persistent_shell
         # setting (true by default for non-local backends); local is always opt-in.
         # Per-backend env vars override if explicitly set.
@@ -1257,7 +1275,7 @@ def terminal_tool(
                             }
 
                         container_config = None
-                        if env_type in ("docker", "singularity", "modal", "daytona"):
+                        if env_type in ("docker", "singularity", "modal", "daytona", "coder"):
                             container_config = {
                                 "container_cpu": config.get("container_cpu", 1),
                                 "container_memory": config.get("container_memory", 5120),
@@ -1266,6 +1284,9 @@ def terminal_tool(
                                 "modal_mode": config.get("modal_mode", "auto"),
                                 "docker_volumes": config.get("docker_volumes", []),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
+                                "coder_url": config.get("coder_url", ""),
+                                "coder_api_key": config.get("coder_api_key", ""),
+                                "coder_workspace": config.get("coder_workspace", ""),
                             }
 
                         local_config = None
@@ -1647,6 +1668,18 @@ def check_terminal_requirements() -> bool:
             if not config.get("coder_url") or not config.get("coder_api_key") or not config.get("coder_workspace"):
                 logger.error(
                     "Coder backend selected but CODER_URL, CODER_API_KEY, and CODER_WORKSPACE must all be set."
+                )
+                return False
+            if not _coder_workspace_exists(
+                base_url=config["coder_url"],
+                workspace=config["coder_workspace"],
+                api_key=config["coder_api_key"],
+                timeout=int(config.get("timeout", 60)),
+            ):
+                logger.error(
+                    "Coder backend selected but workspace %r was not found or was not accessible via %s/api/v2/workspaces/{workspace}.",
+                    config["coder_workspace"],
+                    config["coder_url"].rstrip("/"),
                 )
                 return False
             return True
