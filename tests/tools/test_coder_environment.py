@@ -50,39 +50,22 @@ def test_get_env_config_reads_coder_values(monkeypatch):
     assert config["coder_workspace"] == "workspace-id"
 
 
-def test_get_env_config_prefers_config_terminal_backend(monkeypatch):
-    monkeypatch.setenv("TERMINAL_ENV", "local")
-    monkeypatch.setenv("CODER_URL", "https://coder.example")
-    monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_WORKSPACE", "workspace-id")
-
-    import hermes_cli.config as hermes_config
-    monkeypatch.setattr(hermes_config, "load_config", lambda: {"terminal": {"backend": "coder"}})
+def test_get_env_config_defaults_to_local_without_terminal_env(monkeypatch):
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    monkeypatch.delenv("CODER_URL", raising=False)
+    monkeypatch.delenv("CODER_API_KEY", raising=False)
+    monkeypatch.delenv("CODER_WORKSPACE", raising=False)
 
     config = terminal_tool_module._get_env_config()
 
-    assert config["env_type"] == "coder"
+    assert config["env_type"] == "local"
 
 
-def test_get_env_config_injects_non_secret_coder_settings_from_terminal_config(monkeypatch):
+def test_get_env_config_uses_env_bridged_coder_values(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
-    monkeypatch.setenv("CODER_URL", "https://old.example")
-    monkeypatch.setenv("CODER_WORKSPACE", "old-workspace")
+    monkeypatch.setenv("CODER_URL", "https://configured.example")
+    monkeypatch.setenv("CODER_WORKSPACE", "configured-workspace")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-
-    import hermes_cli.config as hermes_config
-    monkeypatch.setattr(
-        hermes_config,
-        "load_config",
-        lambda: {
-            "terminal": {
-                "backend": "coder",
-                "coder_url": "https://configured.example",
-                "coder_workspace": "configured-workspace",
-                "coder_api_key": "should-not-be-used",
-            }
-        },
-    )
 
     config = terminal_tool_module._get_env_config()
 

@@ -600,33 +600,8 @@ def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
-    configured_env_type = ""
-    configured_coder_url = ""
-    configured_coder_workspace = ""
-    try:
-        from hermes_cli.config import load_config as _load_hermes_config
+    env_type = os.getenv("TERMINAL_ENV", "").strip() or "local"
 
-        terminal_cfg = (_load_hermes_config().get("terminal") or {})
-        configured_env_type = str(terminal_cfg.get("backend") or "").strip()
-        configured_coder_url = str(terminal_cfg.get("coder_url") or "").strip()
-        configured_coder_workspace = str(terminal_cfg.get("coder_workspace") or "").strip()
-    except Exception:
-        configured_env_type = ""
-        configured_coder_url = ""
-        configured_coder_workspace = ""
-    # Non-secret Coder settings follow the rest of terminal config:
-    # config.yaml is authoritative and is injected into env vars so downstream
-    # code can uniformly read os.getenv().  The API key remains env-only.
-    if configured_coder_url:
-        os.environ["CODER_URL"] = configured_coder_url
-    if configured_coder_workspace:
-        os.environ["CODER_WORKSPACE"] = configured_coder_workspace
-    env_override = os.getenv("TERMINAL_ENV", "").strip()
-    if env_override and env_override.lower() != "local":
-        env_type = env_override
-    else:
-        env_type = configured_env_type or env_override or "local"
-    
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in ("true", "1", "yes")
 
     # Default cwd: local uses the host's current directory, everything
