@@ -121,6 +121,8 @@ if _config_path.exists():
         if _terminal_cfg and isinstance(_terminal_cfg, dict):
             _terminal_env_map = {
                 "backend": "TERMINAL_ENV",
+                "coder_url": "CODER_URL",
+                "coder_workspace": "CODER_WORKSPACE",
                 "cwd": "TERMINAL_CWD",
                 "timeout": "TERMINAL_TIMEOUT",
                 "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",

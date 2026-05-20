@@ -598,15 +598,39 @@ def _parse_env_var(name: str, default: str, converter=int, type_label: str = "in
 
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
+    try:
+        from hermes_constants import get_hermes_home as _get_hermes_home
+        from hermes_cli.env_loader import load_hermes_dotenv as _load_hermes_dotenv
+
+        _load_hermes_dotenv(
+            hermes_home=_get_hermes_home(),
+            project_env=Path(__file__).resolve().parents[1] / ".env",
+        )
+    except Exception:
+        pass
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
     configured_env_type = ""
+    configured_coder_url = ""
+    configured_coder_workspace = ""
     try:
         from hermes_cli.config import load_config as _load_hermes_config
 
-        configured_env_type = str((_load_hermes_config().get("terminal") or {}).get("backend") or "").strip()
+        terminal_cfg = (_load_hermes_config().get("terminal") or {})
+        configured_env_type = str(terminal_cfg.get("backend") or "").strip()
+        configured_coder_url = str(terminal_cfg.get("coder_url") or "").strip()
+        configured_coder_workspace = str(terminal_cfg.get("coder_workspace") or "").strip()
     except Exception:
         configured_env_type = ""
+        configured_coder_url = ""
+        configured_coder_workspace = ""
+    # Non-secret Coder settings follow the rest of terminal config:
+    # config.yaml is authoritative and is injected into env vars so downstream
+    # code can uniformly read os.getenv().  The API key remains env-only.
+    if configured_coder_url:
+        os.environ["CODER_URL"] = configured_coder_url
+    if configured_coder_workspace:
+        os.environ["CODER_WORKSPACE"] = configured_coder_workspace
     env_override = os.getenv("TERMINAL_ENV", "").strip()
     if env_override and env_override.lower() != "local":
         env_type = env_override
@@ -630,13 +654,9 @@ def _get_env_config() -> Dict[str, Any]:
     # /workspace and track the original host path separately. Otherwise keep the
     # normal sandbox behavior and discard host paths.
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
-    try:
-        from hermes_cli.config import get_env_value as _get_secret_env_value
-    except Exception:
-        _get_secret_env_value = os.getenv
-    coder_url = _get_secret_env_value("CODER_URL") or ""
-    coder_api_key = _get_secret_env_value("CODER_API_KEY") or ""
-    coder_workspace = _get_secret_env_value("CODER_WORKSPACE") or ""
+    coder_url = os.getenv("CODER_URL", "")
+    coder_api_key = os.getenv("CODER_API_KEY", "")
+    coder_workspace = os.getenv("CODER_WORKSPACE", "")
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:

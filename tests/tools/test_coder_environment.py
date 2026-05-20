@@ -64,6 +64,35 @@ def test_get_env_config_prefers_config_terminal_backend(monkeypatch):
     assert config["env_type"] == "coder"
 
 
+def test_get_env_config_injects_non_secret_coder_settings_from_terminal_config(monkeypatch):
+    monkeypatch.setenv("TERMINAL_ENV", "coder")
+    monkeypatch.setenv("CODER_URL", "https://old.example")
+    monkeypatch.setenv("CODER_WORKSPACE", "old-workspace")
+    monkeypatch.setenv("CODER_API_KEY", "secret-token")
+
+    import hermes_cli.config as hermes_config
+    monkeypatch.setattr(
+        hermes_config,
+        "load_config",
+        lambda: {
+            "terminal": {
+                "backend": "coder",
+                "coder_url": "https://configured.example",
+                "coder_workspace": "configured-workspace",
+                "coder_api_key": "should-not-be-used",
+            }
+        },
+    )
+
+    config = terminal_tool_module._get_env_config()
+
+    assert config["coder_url"] == "https://configured.example"
+    assert config["coder_workspace"] == "configured-workspace"
+    assert config["coder_api_key"] == "secret-token"
+    assert config["coder_url"] == terminal_tool_module.os.getenv("CODER_URL")
+    assert config["coder_workspace"] == terminal_tool_module.os.getenv("CODER_WORKSPACE")
+
+
 def test_create_environment_constructs_coder_backend(monkeypatch):
     sentinel = object()
     ctor = MagicMock(return_value=sentinel)

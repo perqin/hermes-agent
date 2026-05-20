@@ -31,6 +31,8 @@ def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
     if terminal_cfg and isinstance(terminal_cfg, dict):
         terminal_env_map = {
             "backend": "TERMINAL_ENV",
+            "coder_url": "CODER_URL",
+            "coder_workspace": "CODER_WORKSPACE",
             "cwd": "TERMINAL_CWD",
             "timeout": "TERMINAL_TIMEOUT",
         }
@@ -205,3 +207,16 @@ class TestNestedTerminalCwdPlaceholderSkip:
         assert result["TERMINAL_ENV"] == "docker"
         assert result["TERMINAL_TIMEOUT"] == "300"
         assert result["TERMINAL_CWD"] == "/from/env"
+
+    def test_coder_terminal_keys_bridge_to_env(self):
+        cfg = {
+            "terminal": {
+                "backend": "coder",
+                "coder_url": "https://coder.example",
+                "coder_workspace": "workspace-id",
+            }
+        }
+        result = _simulate_config_bridge(cfg)
+        assert result["TERMINAL_ENV"] == "coder"
+        assert result["CODER_URL"] == "https://coder.example"
+        assert result["CODER_WORKSPACE"] == "workspace-id"
