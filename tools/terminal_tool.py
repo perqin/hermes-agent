@@ -598,16 +598,6 @@ def _parse_env_var(name: str, default: str, converter=int, type_label: str = "in
 
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
-    try:
-        from hermes_constants import get_hermes_home as _get_hermes_home
-        from hermes_cli.env_loader import load_hermes_dotenv as _load_hermes_dotenv
-
-        _load_hermes_dotenv(
-            hermes_home=_get_hermes_home(),
-            project_env=Path(__file__).resolve().parents[1] / ".env",
-        )
-    except Exception:
-        pass
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
     configured_env_type = ""
