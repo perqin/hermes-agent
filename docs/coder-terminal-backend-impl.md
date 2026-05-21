@@ -26,6 +26,137 @@ All of those tools should operate against the Coder workspace through the same e
 
 ## Current Architecture Summary
 
+## Dynamic workspace mapping decision
+
+For dynamic Coder workspaces, Hermes should treat the workspace-binding key as a **logical conversation identity**, not as the current transcript fragment ID and not as the gateway routing key.
+
+### Decision
+
+Use the **lineage root `session_id`** as the key that maps a Hermes session to a Coder workspace.
+
+Definition:
+
+- if the current `session_id` has no `parent_session_id`, it is its own lineage root
+- otherwise, follow `parent_session_id` repeatedly until reaching the top ancestor
+- that root `session_id` is the workspace-mapping key
+
+### Why this key
+
+This choice matches Hermes's current session semantics better than the other available identifiers:
+
+- **Do not use raw current `session_id`**
+  - Hermes context compression creates a new child session with a fresh `session_id`
+  - binding workspaces directly to the current `session_id` would incorrectly create a new workspace after each compression split
+- **Do not use gateway `session_key`**
+  - `session_key` is stable for a chat/thread/user slot
+  - it typically survives `/new`, idle reset, and daily reset
+  - binding workspaces to it would incorrectly reuse an old workspace after a true new-session boundary
+- **Use lineage root `session_id`**
+  - stays stable across compression continuations
+  - changes when Hermes starts a genuinely fresh session with no parent linkage
+
+### Implementation constraints
+
+This design should preserve Hermes's existing session metadata model.
+
+- resolve the lineage root **on demand**
+- **do not** add new persistent session metadata fields such as `logical_session_id` or `root_session_id`
+- prefer reusing Hermes's existing parent-chain traversal logic where possible
+  - especially the lineage-resolution pattern already present in `tools/session_search_tool.py`
+
+### Behavioral consequences
+
+- normal continued conversation -> reuse the same Coder workspace
+- context compression -> reuse the same Coder workspace
+- `/new`, explicit reset, idle reset, daily reset -> create a new logical root, therefore a new Coder workspace
+- session search / historical records remain unchanged; the workspace mapping logic is layered on top of existing session lineage
+
+### Relevant code landmarks
+
+- `run_agent.py`
+  - agent-side `session_id` generation
+  - `_compress_context()` creates a new child session and sets `parent_session_id`
+- `gateway/session.py`
+  - `build_session_key()`
+  - `SessionStore.get_or_create_session()` for true new-session boundaries
+- `gateway/run.py`
+  - rewires `session_key -> session_id` after compression splits
+- `tools/session_search_tool.py`
+  - existing parent-chain traversal that already treats compression continuations as one lineage
+
+## Workspace name derivation constraints
+
+Using the lineage root `session_id` as the **mapping key** does **not** mean Hermes can always use the raw string unchanged as the Coder workspace **name**.
+
+### Hermes `session_id` formats today
+
+Hermes currently generates session IDs in two closely related forms:
+
+- agent-created sessions: `YYYYMMDD_HHMMSS_<6 hex chars>`
+- gateway-created sessions: `YYYYMMDD_HHMMSS_<8 hex chars>`
+
+So the current raw lengths are:
+
+- 22 characters for the 6-hex form
+- 24 characters for the 8-hex form
+
+Both are comfortably short, but they contain underscores.
+
+### Coder workspace naming constraints
+
+Coder's API schema for `CreateWorkspaceRequest` documents these workspace-name rules:
+
+- must start with a letter or number
+- may contain only letters, numbers, and hyphens
+- may not contain spaces or other special characters
+- may not be named `new` or `create`
+- maximum length: 32 characters
+- must be unique within the user's workspaces
+
+### Implication
+
+A raw Hermes `session_id` is **not** safe to use directly as a Coder workspace name, because the underscore characters violate Coder's documented name constraints.
+
+Length is **not** the blocker here; character set is.
+
+### Practical naming guidance
+
+Hermes should therefore distinguish between:
+
+- **workspace mapping key**: raw lineage root `session_id`
+- **workspace name**: a Coder-safe derivative of that key
+
+The workspace name scheme should be fixed as:
+
+- start from the raw lineage root `session_id`
+- replace every `_` with `-`
+- prepend the stable prefix `hermes-`
+
+In other words:
+
+- **mapping key**: raw lineage root `session_id`
+- **workspace name**: ``hermes-`` + `session_id.replace("_", "-")`
+
+Examples:
+
+- root key: `20260521_173045_ab12cd`
+- workspace name: `hermes-20260521-173045-ab12cd`
+- root key: `20260521_173045_ab12cd34`
+- workspace name: `hermes-20260521-173045-ab12cd34`
+
+This scheme remains within Coder's 32-character limit for current Hermes session ID formats:
+
+- 6-hex form -> 29 chars after prefixing and normalization
+- 8-hex form -> 31 chars after prefixing and normalization
+
+Using the fixed `hermes-` prefix is desirable because it:
+
+- avoids accidental collision with user-created workspace names
+- ensures the generated name can never equal reserved values like `new` or `create`
+- makes Hermes-owned workspaces easy to identify operationally
+- gives Hermes one deterministic reversible naming rule instead of multiple acceptable variants
+
+
 Hermes already has a reasonably clean terminal backend abstraction:
 
 1. `tools/environments/base.py`
