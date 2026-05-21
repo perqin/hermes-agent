@@ -5,13 +5,13 @@ optionally auto-start a stopped workspace, open the workspace PTY websocket,
 and read terminal output until EOF.
 
 Current intentional limitations for the bootstrap step:
-- ignores the requested command and always runs `pwd`
 - treats websocket EOF/close as successful completion
 - no persistent shell/session snapshot integration yet
 """
 
 from __future__ import annotations
 
+import shlex
 import time
 import urllib.parse
 import uuid
@@ -40,6 +40,8 @@ def coder_workspace_exists(*, base_url: str, workspace: str, api_key: str, timeo
 
 class CoderEnvironment(BaseEnvironment):
     """Execute commands inside a Coder workspace via the /pty websocket."""
+
+    _stdin_mode = "heredoc"
 
     def __init__(
         self,
@@ -144,13 +146,17 @@ class CoderEnvironment(BaseEnvironment):
                     return agent_id
         raise RuntimeError(f"No workspace agent found for Coder workspace {self.workspace!r}")
 
-    def _pty_url(self, agent_id: str) -> str:
+    def _pty_command(self, cmd_string: str, *, login: bool) -> str:
+        shell_flag = "-lc" if login else "-c"
+        return f"bash {shell_flag} {shlex.quote(cmd_string)}"
+
+    def _pty_url(self, agent_id: str, *, command: str) -> str:
         parsed = urllib.parse.urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         query = urllib.parse.urlencode(
             {
                 "reconnect": str(uuid.uuid4()),
-                "command": "pwd",
+                "command": command,
                 "height": 80,
                 "width": 80,
             }
@@ -166,9 +172,10 @@ class CoderEnvironment(BaseEnvironment):
             )
         )
 
-    def _execute_via_pty(self) -> tuple[str, int]:
+    def _execute_via_pty(self, cmd_string: str, *, login: bool) -> tuple[str, int]:
         agent_id = self._resolve_agent_id()
-        pty_url = self._pty_url(agent_id)
+        pty_command = self._pty_command(cmd_string, login=login)
+        pty_url = self._pty_url(agent_id, command=pty_command)
         output_parts: list[str] = []
 
         with connect(
@@ -200,8 +207,8 @@ class CoderEnvironment(BaseEnvironment):
         timeout: int = 120,
         stdin_data: str | None = None,
     ):
-        del cmd_string, login, timeout, stdin_data
-        return _ThreadedProcessHandle(self._execute_via_pty)
+        del timeout, stdin_data
+        return _ThreadedProcessHandle(lambda: self._execute_via_pty(cmd_string, login=login))
 
     def cleanup(self):
         return None

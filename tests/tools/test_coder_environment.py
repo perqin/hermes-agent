@@ -1,5 +1,6 @@
 import json
 import logging
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import MagicMock
 
 from tools.environments.coder import CoderEnvironment
@@ -165,7 +166,7 @@ def test_coder_environment_execute_reads_pty_until_eof(monkeypatch):
             ]
         }
     }
-    fake_ws = _FakeWebSocket([b"/workspace\n"])
+    fake_ws = _FakeWebSocket([b"hello from coder\n"])
     connect_mock = MagicMock(return_value=fake_ws)
     requests_get = MagicMock(return_value=_FakeResponse(workspace_payload))
 
@@ -180,16 +181,20 @@ def test_coder_environment_execute_reads_pty_until_eof(monkeypatch):
         timeout=5,
     )
 
-    result = env.execute("echo ignored")
+    result = env.execute("echo hello-from-hermes")
 
     assert result["returncode"] == 0
-    assert result["output"] == "/workspace\n"
+    assert result["output"] == "hello from coder\n"
 
     requests_get.assert_called_once()
     connect_kwargs = connect_mock.call_args.kwargs
     assert connect_kwargs["additional_headers"]["Coder-Session-Token"] == "secret-token"
-    assert "command=pwd" in connect_mock.call_args.args[0]
-    assert "/api/v2/workspaceagents/agent-123/pty" in connect_mock.call_args.args[0]
+    connect_url = connect_mock.call_args.args[0]
+    assert "/api/v2/workspaceagents/agent-123/pty" in connect_url
+    pty_command = parse_qs(urlparse(connect_url).query)["command"][0]
+    assert pty_command.startswith("bash -lc ")
+    assert "echo hello-from-hermes" in pty_command
+    assert pty_command != "pwd"
 
 
 def test_coder_environment_autostarts_stopped_workspace(monkeypatch):
@@ -239,8 +244,8 @@ def test_coder_environment_autostarts_stopped_workspace(monkeypatch):
 def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch):
     class _FakeEnv:
         def execute(self, command, timeout=None, workdir=None, pty=False):
-            assert command == "pwd"
-            return {"output": "/workspace\n", "returncode": 0}
+            assert command == "printf 'hi from coder'"
+            return {"output": "hi from coder", "returncode": 0}
 
     create_env = MagicMock(return_value=_FakeEnv())
     monkeypatch.setattr(terminal_tool_module, "_create_environment", create_env)
@@ -255,7 +260,7 @@ def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch)
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
     monkeypatch.setenv("CODER_WORKSPACE", "workspace-id")
 
-    payload = json.loads(terminal_tool_module.terminal_tool(command="pwd", task_id="coder-test"))
+    payload = json.loads(terminal_tool_module.terminal_tool(command="printf 'hi from coder'", task_id="coder-test"))
 
     assert payload["exit_code"] == 0
     create_env.assert_called_once()
