@@ -32,7 +32,7 @@ def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
         terminal_env_map = {
             "backend": "TERMINAL_ENV",
             "coder_url": "CODER_URL",
-            "coder_workspace": "CODER_WORKSPACE",
+            "coder_template": "CODER_TEMPLATE",
             "cwd": "TERMINAL_CWD",
             "timeout": "TERMINAL_TIMEOUT",
         }
@@ -213,10 +213,10 @@ class TestNestedTerminalCwdPlaceholderSkip:
             "terminal": {
                 "backend": "coder",
                 "coder_url": "https://coder.example",
-                "coder_workspace": "workspace-id",
+                "coder_template": "template-uuid",
             }
         }
         result = _simulate_config_bridge(cfg)
         assert result["TERMINAL_ENV"] == "coder"
         assert result["CODER_URL"] == "https://coder.example"
-        assert result["CODER_WORKSPACE"] == "workspace-id"
+        assert result["CODER_TEMPLATE"] == "template-uuid"

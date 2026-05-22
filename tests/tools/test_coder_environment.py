@@ -3,7 +3,8 @@ import logging
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import MagicMock
 
-from tools.environments.coder import CoderEnvironment
+from hermes_state import SessionDB
+from tools.environments.coder import CoderEnvironment, coder_workspace_name_for_task
 import tools.terminal_tool as terminal_tool_module
 
 
@@ -37,25 +38,26 @@ class _FakeResponse:
     def json(self):
         return self._payload
 
+
 def test_get_env_config_reads_coder_values(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://coder.example")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_WORKSPACE", "workspace-id")
+    monkeypatch.setenv("CODER_TEMPLATE", "template-uuid")
 
     config = terminal_tool_module._get_env_config()
 
     assert config["env_type"] == "coder"
     assert config["coder_url"] == "https://coder.example"
     assert config["coder_api_key"] == "secret-token"
-    assert config["coder_workspace"] == "workspace-id"
+    assert config["coder_template"] == "template-uuid"
 
 
 def test_get_env_config_defaults_to_local_without_terminal_env(monkeypatch):
     monkeypatch.delenv("TERMINAL_ENV", raising=False)
     monkeypatch.delenv("CODER_URL", raising=False)
     monkeypatch.delenv("CODER_API_KEY", raising=False)
-    monkeypatch.delenv("CODER_WORKSPACE", raising=False)
+    monkeypatch.delenv("CODER_TEMPLATE", raising=False)
 
     config = terminal_tool_module._get_env_config()
 
@@ -65,16 +67,16 @@ def test_get_env_config_defaults_to_local_without_terminal_env(monkeypatch):
 def test_get_env_config_uses_env_bridged_coder_values(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://configured.example")
-    monkeypatch.setenv("CODER_WORKSPACE", "configured-workspace")
+    monkeypatch.setenv("CODER_TEMPLATE", "configured-template")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
 
     config = terminal_tool_module._get_env_config()
 
     assert config["coder_url"] == "https://configured.example"
-    assert config["coder_workspace"] == "configured-workspace"
+    assert config["coder_template"] == "configured-template"
     assert config["coder_api_key"] == "secret-token"
     assert config["coder_url"] == terminal_tool_module.os.getenv("CODER_URL")
-    assert config["coder_workspace"] == terminal_tool_module.os.getenv("CODER_WORKSPACE")
+    assert config["coder_template"] == terminal_tool_module.os.getenv("CODER_TEMPLATE")
 
 
 def test_create_environment_constructs_coder_backend(monkeypatch):
@@ -90,7 +92,7 @@ def test_create_environment_constructs_coder_backend(monkeypatch):
         container_config={
             "coder_url": "https://coder.example",
             "coder_api_key": "secret-token",
-            "coder_workspace": "workspace-id",
+            "coder_template": "template-uuid",
         },
         task_id="task-coder",
     )
@@ -98,84 +100,89 @@ def test_create_environment_constructs_coder_backend(monkeypatch):
     assert result is sentinel
     ctor.assert_called_once_with(
         base_url="https://coder.example",
-        workspace="workspace-id",
+        template_id="template-uuid",
+        task_id="task-coder",
         api_key="secret-token",
         cwd="/root",
         timeout=30,
     )
 
 
-def test_coder_requirements_missing_workspace_logs_error(monkeypatch, caplog):
+def test_coder_requirements_missing_template_logs_error(monkeypatch, caplog):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://coder.example")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.delenv("CODER_WORKSPACE", raising=False)
+    monkeypatch.delenv("CODER_TEMPLATE", raising=False)
 
     with caplog.at_level(logging.ERROR):
         ok = terminal_tool_module.check_terminal_requirements()
 
     assert ok is False
     assert any(
-        "Coder backend selected but CODER_URL, CODER_API_KEY, and CODER_WORKSPACE must all be set"
+        "Coder backend selected but CODER_URL, CODER_API_KEY, and CODER_TEMPLATE must all be set"
         in record.getMessage()
         for record in caplog.records
     )
 
 
-def test_coder_requirements_checks_workspace_exists(monkeypatch):
+def test_coder_requirements_with_template_only_passes(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://coder.example")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_WORKSPACE", "workspace-id")
-
-    exists = MagicMock(return_value=True)
-    monkeypatch.setattr(terminal_tool_module, "_coder_workspace_exists", exists)
+    monkeypatch.setenv("CODER_TEMPLATE", "template-uuid")
 
     assert terminal_tool_module.check_terminal_requirements() is True
-    exists.assert_called_once_with(
-        base_url="https://coder.example",
-        workspace="workspace-id",
-        api_key="secret-token",
-        timeout=180,
+
+
+def test_workspace_name_uses_lineage_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session(session_id="20260521_173045_ab12cd", source="cli")
+    db.create_session(
+        session_id="20260521_180000_ef3456",
+        source="cli",
+        parent_session_id="20260521_173045_ab12cd",
+    )
+
+    assert (
+        coder_workspace_name_for_task("20260521_180000_ef3456", db=db)
+        == "hermes-20260521-173045-ab12cd"
     )
 
 
-def test_coder_requirements_missing_remote_workspace_logs_error(monkeypatch, caplog):
-    monkeypatch.setenv("TERMINAL_ENV", "coder")
-    monkeypatch.setenv("CODER_URL", "https://coder.example")
-    monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_WORKSPACE", "missing-workspace")
-    monkeypatch.setattr(terminal_tool_module, "_coder_workspace_exists", MagicMock(return_value=False))
-
-    with caplog.at_level(logging.ERROR):
-        ok = terminal_tool_module.check_terminal_requirements()
-
-    assert ok is False
-    assert any(
-        "missing-workspace" in record.getMessage() and "not found or was not accessible" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_coder_environment_execute_reads_pty_until_eof(monkeypatch):
-    workspace_payload = {
+def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(monkeypatch):
+    workspace_created = {
+        "id": "workspace-123",
+        "name": "hermes-20260521-173045-ab12cd",
         "latest_build": {
             "transition": "start",
-            "resources": [
-                {"agents": [{"id": "agent-123"}]},
-            ]
-        }
+            "resources": [{"agents": [{"id": "agent-123"}]}],
+        },
     }
     fake_ws = _FakeWebSocket([b"hello from coder\n"])
     connect_mock = MagicMock(return_value=fake_ws)
-    requests_get = MagicMock(return_value=_FakeResponse(workspace_payload))
+    requests_get = MagicMock(
+        side_effect=[
+            _FakeResponse({"workspaces": []}),
+            _FakeResponse([{"id": "org-123", "is_default": True}]),
+            _FakeResponse(workspace_created),
+            _FakeResponse(workspace_created),
+        ]
+    )
+    requests_post = MagicMock(return_value=_FakeResponse(workspace_created, status_code=201))
 
     monkeypatch.setattr("tools.environments.coder.requests.get", requests_get)
+    monkeypatch.setattr("tools.environments.coder.requests.post", requests_post)
     monkeypatch.setattr("tools.environments.coder.connect", connect_mock)
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
 
     env = CoderEnvironment(
         base_url="https://coder.example",
-        workspace="workspace-id",
+        template_id="template-uuid",
+        task_id="20260521_180000_ef3456",
         api_key="secret-token",
         cwd="/root",
         timeout=5,
@@ -186,7 +193,16 @@ def test_coder_environment_execute_reads_pty_until_eof(monkeypatch):
     assert result["returncode"] == 0
     assert result["output"] == "hello from coder\n"
 
-    requests_get.assert_called_once()
+    requests_post.assert_called_once_with(
+        "https://coder.example/api/v2/organizations/org-123/members/me/workspaces",
+        headers={
+            "Coder-Session-Token": "secret-token",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={"name": "hermes-20260521-173045-ab12cd", "template_id": "template-uuid"},
+        timeout=5,
+    )
     connect_kwargs = connect_mock.call_args.kwargs
     assert connect_kwargs["additional_headers"]["Coder-Session-Token"] == "secret-token"
     connect_url = connect_mock.call_args.args[0]
@@ -197,9 +213,10 @@ def test_coder_environment_execute_reads_pty_until_eof(monkeypatch):
     assert pty_command != "pwd"
 
 
-def test_coder_environment_autostarts_stopped_workspace(monkeypatch):
-    stopped_workspace = {
+def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
+    existing_workspace = {
         "id": "workspace-123",
+        "name": "hermes-20260521-173045-ab12cd",
         "latest_build": {
             "transition": "stop",
             "status": "stopped",
@@ -208,6 +225,7 @@ def test_coder_environment_autostarts_stopped_workspace(monkeypatch):
     }
     started_workspace = {
         "id": "workspace-123",
+        "name": "hermes-20260521-173045-ab12cd",
         "latest_build": {
             "transition": "start",
             "resources": [{"agents": [{"id": "agent-123"}]}],
@@ -215,8 +233,10 @@ def test_coder_environment_autostarts_stopped_workspace(monkeypatch):
     }
     requests_get = MagicMock(
         side_effect=[
-            _FakeResponse(stopped_workspace),
+            _FakeResponse({"workspaces": [existing_workspace]}),
+            _FakeResponse(existing_workspace),
             _FakeResponse({"job": {"status": "succeeded", "completed_at": "2026-05-19T10:10:00Z"}}),
+            _FakeResponse({"workspaces": [started_workspace]}),
             _FakeResponse(started_workspace),
         ]
     )
@@ -225,10 +245,15 @@ def test_coder_environment_autostarts_stopped_workspace(monkeypatch):
     monkeypatch.setattr("tools.environments.coder.requests.get", requests_get)
     monkeypatch.setattr("tools.environments.coder.requests.post", requests_post)
     monkeypatch.setattr("tools.environments.coder.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
 
     env = CoderEnvironment(
         base_url="https://coder.example",
-        workspace="workspace-id",
+        template_id="template-uuid",
+        task_id="20260521_180000_ef3456",
         api_key="secret-token",
     )
 
@@ -258,7 +283,7 @@ def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://coder.example")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_WORKSPACE", "workspace-id")
+    monkeypatch.setenv("CODER_TEMPLATE", "template-uuid")
 
     payload = json.loads(terminal_tool_module.terminal_tool(command="printf 'hi from coder'", task_id="coder-test"))
 
@@ -266,4 +291,4 @@ def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch)
     create_env.assert_called_once()
     assert create_env.call_args.kwargs["container_config"]["coder_url"] == "https://coder.example"
     assert create_env.call_args.kwargs["container_config"]["coder_api_key"] == "secret-token"
-    assert create_env.call_args.kwargs["container_config"]["coder_workspace"] == "workspace-id"
+    assert create_env.call_args.kwargs["container_config"]["coder_template"] == "template-uuid"

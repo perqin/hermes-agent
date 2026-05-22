@@ -127,15 +127,15 @@ class TestConfigYamlRouting:
             or "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=True" in env_content
         )
 
-    def test_terminal_coder_url_and_workspace_go_to_config_and_env(self, _isolated_hermes_home):
+    def test_terminal_coder_url_and_template_go_to_config_and_env(self, _isolated_hermes_home):
         set_config_value("terminal.coder_url", "https://coder.example")
-        set_config_value("terminal.coder_workspace", "workspace-id")
+        set_config_value("terminal.coder_template", "template-uuid")
         config = _read_config(_isolated_hermes_home)
         env_content = _read_env(_isolated_hermes_home)
         assert "coder_url: https://coder.example" in config
-        assert "coder_workspace: workspace-id" in config
+        assert "coder_template: template-uuid" in config
         assert "CODER_URL=https://coder.example" in env_content
-        assert "CODER_WORKSPACE=workspace-id" in env_content
+        assert "CODER_TEMPLATE=template-uuid" in env_content
 
 
 # ---------------------------------------------------------------------------

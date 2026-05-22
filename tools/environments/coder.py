@@ -1,8 +1,8 @@
 """Minimal Coder execution environment.
 
 v1 bootstrap implementation: resolve a workspace agent over the Coder REST API,
-optionally auto-start a stopped workspace, open the workspace PTY websocket,
-and read terminal output until EOF.
+optionally create or auto-start a stopped workspace, open the workspace PTY
+websocket, and read terminal output until EOF.
 
 Current intentional limitations for the bootstrap step:
 - treats websocket EOF/close as successful completion
@@ -11,6 +11,7 @@ Current intentional limitations for the bootstrap step:
 
 from __future__ import annotations
 
+import re
 import shlex
 import time
 import urllib.parse
@@ -20,22 +21,140 @@ import requests
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
+from hermes_state import SessionDB
 from tools.environments.base import BaseEnvironment, _ThreadedProcessHandle
 
 
-def coder_workspace_exists(*, base_url: str, workspace: str, api_key: str, timeout: int = 10) -> bool:
-    """Return True when the configured workspace can be fetched from the Coder API."""
-    workspace_url = f"{base_url.rstrip('/')}/api/v2/workspaces/{urllib.parse.quote(workspace, safe='')}"
+_WORKSPACE_NAME_PREFIX = "hermes-"
+_WORKSPACE_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,31})$")
+
+
+def _coder_headers(api_key: str) -> dict[str, str]:
+    return {"Coder-Session-Token": api_key}
+
+
+
+def _resolve_lineage_root_session_id(session_id: str, db: SessionDB | None = None) -> str:
+    """Resolve the lineage root for a Hermes session ID.
+
+    If the session cannot be found, fall back to the provided ID unchanged.
+    """
+    if not session_id:
+        raise ValueError("Coder workspace resolution requires a non-empty session/task id")
+
+    database = db or SessionDB()
+    current = session_id
+    visited: set[str] = set()
+
+    while current and current not in visited:
+        visited.add(current)
+        session = database.get_session(current)
+        if not session:
+            break
+        parent = session.get("parent_session_id")
+        if not parent:
+            return current
+        current = parent
+
+    return current or session_id
+
+
+
+def coder_workspace_name_for_task(task_id: str, db: SessionDB | None = None) -> str:
+    """Map a Hermes task/session to a deterministic Coder workspace name."""
+    root_session_id = _resolve_lineage_root_session_id(task_id, db=db)
+    workspace_name = f"{_WORKSPACE_NAME_PREFIX}{root_session_id.replace('_', '-')}"
+    if not _WORKSPACE_NAME_PATTERN.fullmatch(workspace_name):
+        raise ValueError(
+            "Derived Coder workspace name %r is invalid; expected %r + a Hermes lineage root session id"
+            % (workspace_name, _WORKSPACE_NAME_PREFIX)
+        )
+    return workspace_name
+
+
+
+def _workspace_search_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/api/v2/workspaces"
+
+
+
+def _user_organizations_url(base_url: str, user: str = "me") -> str:
+    user_part = urllib.parse.quote(user, safe="")
+    return f"{base_url.rstrip('/')}/api/v2/users/{user_part}/organizations"
+
+
+
+def _create_workspace_url(base_url: str, organization_id: str, user: str = "me") -> str:
+    org_part = urllib.parse.quote(organization_id, safe="")
+    user_part = urllib.parse.quote(user, safe="")
+    return f"{base_url.rstrip('/')}/api/v2/organizations/{org_part}/members/{user_part}/workspaces"
+
+
+
+def _find_workspace_by_name(*, base_url: str, workspace_name: str, api_key: str, timeout: int = 10) -> dict | None:
     response = requests.get(
-        workspace_url,
-        headers={"Coder-Session-Token": api_key},
+        _workspace_search_url(base_url),
+        headers=_coder_headers(api_key),
+        params={"q": f"owner:me name:{workspace_name}", "limit": 100},
         timeout=timeout,
     )
-    if response.status_code == 404:
-        return False
     response.raise_for_status()
     payload = response.json()
-    return isinstance(payload, dict) and bool(payload)
+    workspaces = payload.get("workspaces") if isinstance(payload, dict) else None
+    if not isinstance(workspaces, list):
+        raise RuntimeError(f"Unexpected workspace search payload while looking up {workspace_name!r}")
+    for workspace in workspaces:
+        if isinstance(workspace, dict) and workspace.get("name") == workspace_name:
+            owner = workspace.get("owner_name") or workspace.get("owner", {}).get("username")
+            if owner in (None, "", "me") or owner == workspace.get("owner_name"):
+                return workspace
+    return None
+
+
+
+def _get_default_organization_id(*, base_url: str, api_key: str, timeout: int = 10) -> str:
+    response = requests.get(
+        _user_organizations_url(base_url),
+        headers=_coder_headers(api_key),
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("Coder user has no accessible organizations for workspace creation")
+    default_org = next((org for org in payload if isinstance(org, dict) and org.get("is_default")), None)
+    chosen = default_org or payload[0]
+    org_id = chosen.get("id") if isinstance(chosen, dict) else None
+    if not org_id:
+        raise RuntimeError("Coder organization payload did not include an id")
+    return org_id
+
+
+
+def _create_workspace(*, base_url: str, workspace_name: str, template_id: str, api_key: str, timeout: int = 10) -> dict:
+    organization_id = _get_default_organization_id(base_url=base_url, api_key=api_key, timeout=timeout)
+    response = requests.post(
+        _create_workspace_url(base_url, organization_id),
+        headers={**_coder_headers(api_key), "Content-Type": "application/json", "Accept": "application/json"},
+        json={"name": workspace_name, "template_id": template_id},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected create-workspace payload for Coder workspace {workspace_name!r}")
+    return payload
+
+
+
+def coder_workspace_exists(*, base_url: str, workspace_name: str, api_key: str, timeout: int = 10) -> bool:
+    """Return True when a workspace with the given name exists for the current user."""
+    return _find_workspace_by_name(
+        base_url=base_url,
+        workspace_name=workspace_name,
+        api_key=api_key,
+        timeout=timeout,
+    ) is not None
 
 
 class CoderEnvironment(BaseEnvironment):
@@ -47,22 +166,28 @@ class CoderEnvironment(BaseEnvironment):
         self,
         *,
         base_url: str,
-        workspace: str,
+        template_id: str,
+        task_id: str,
         api_key: str,
         cwd: str = "~",
         timeout: int = 60,
     ):
         super().__init__(cwd=cwd, timeout=timeout)
         self.base_url = base_url.rstrip("/")
-        self.workspace = workspace
+        self.template_id = template_id
+        self.task_id = task_id
+        self.workspace = coder_workspace_name_for_task(task_id)
         self.api_key = api_key
+        self._workspace_id: str | None = None
 
     def _headers(self) -> dict[str, str]:
-        return {"Coder-Session-Token": self.api_key}
+        return _coder_headers(self.api_key)
 
     def _workspace_url(self) -> str:
-        workspace = urllib.parse.quote(self.workspace, safe="")
-        return f"{self.base_url}/api/v2/workspaces/{workspace}"
+        if not self._workspace_id:
+            raise RuntimeError(f"Coder workspace {self.workspace!r} has not been resolved yet")
+        workspace_id = urllib.parse.quote(self._workspace_id, safe="")
+        return f"{self.base_url}/api/v2/workspaces/{workspace_id}"
 
     def _workspace_build_url(self, build_id: str) -> str:
         return f"{self.base_url}/api/v2/workspacebuilds/{urllib.parse.quote(build_id, safe='')}"
@@ -70,7 +195,29 @@ class CoderEnvironment(BaseEnvironment):
     def _workspace_builds_url(self, workspace_id: str) -> str:
         return f"{self.base_url}/api/v2/workspaces/{urllib.parse.quote(workspace_id, safe='')}/builds"
 
+    def _ensure_workspace(self) -> dict:
+        payload = _find_workspace_by_name(
+            base_url=self.base_url,
+            workspace_name=self.workspace,
+            api_key=self.api_key,
+            timeout=self.timeout,
+        )
+        if payload is None:
+            payload = _create_workspace(
+                base_url=self.base_url,
+                workspace_name=self.workspace,
+                template_id=self.template_id,
+                api_key=self.api_key,
+                timeout=self.timeout,
+            )
+        workspace_id = payload.get("id") if isinstance(payload, dict) else None
+        if not workspace_id:
+            raise RuntimeError(f"Coder workspace {self.workspace!r} did not include a workspace id")
+        self._workspace_id = workspace_id
+        return payload
+
     def _get_workspace_payload(self) -> dict:
+        self._ensure_workspace()
         response = requests.get(
             self._workspace_url(),
             headers=self._headers(),

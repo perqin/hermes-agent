@@ -504,7 +504,7 @@ from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
-from tools.environments.coder import CoderEnvironment as _CoderEnvironment, coder_workspace_exists as _coder_workspace_exists
+from tools.environments.coder import CoderEnvironment as _CoderEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -621,7 +621,7 @@ def _get_env_config() -> Dict[str, Any]:
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
     coder_url = os.getenv("CODER_URL", "")
     coder_api_key = os.getenv("CODER_API_KEY", "")
-    coder_workspace = os.getenv("CODER_WORKSPACE", "")
+    coder_template = os.getenv("CODER_TEMPLATE", "")
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:
@@ -664,7 +664,7 @@ def _get_env_config() -> Dict[str, Any]:
         # Coder-specific config
         "coder_url": coder_url,
         "coder_api_key": coder_api_key,
-        "coder_workspace": coder_workspace,
+        "coder_template": coder_template,
         # Persistent shell: SSH defaults to the config-level persistent_shell
         # setting (true by default for non-local backends); local is always opt-in.
         # Per-backend env vars override if explicitly set.
@@ -817,11 +817,12 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
 
     elif env_type == "coder":
-        if not cc.get("coder_url") or not cc.get("coder_api_key") or not cc.get("coder_workspace"):
-            raise ValueError("Coder environment requires CODER_URL, CODER_API_KEY, and CODER_WORKSPACE")
+        if not cc.get("coder_url") or not cc.get("coder_api_key") or not cc.get("coder_template"):
+            raise ValueError("Coder environment requires CODER_URL, CODER_API_KEY, and CODER_TEMPLATE")
         return _CoderEnvironment(
             base_url=cc["coder_url"],
-            workspace=cc["coder_workspace"],
+            template_id=cc["coder_template"],
+            task_id=task_id,
             api_key=cc["coder_api_key"],
             cwd=cwd,
             timeout=timeout,
@@ -1271,7 +1272,7 @@ def terminal_tool(
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                                 "coder_url": config.get("coder_url", ""),
                                 "coder_api_key": config.get("coder_api_key", ""),
-                                "coder_workspace": config.get("coder_workspace", ""),
+                                "coder_template": config.get("coder_template", ""),
                             }
 
                         local_config = None
@@ -1650,21 +1651,9 @@ def check_terminal_requirements() -> bool:
             return os.getenv("DAYTONA_API_KEY") is not None
 
         elif env_type == "coder":
-            if not config.get("coder_url") or not config.get("coder_api_key") or not config.get("coder_workspace"):
+            if not config.get("coder_url") or not config.get("coder_api_key") or not config.get("coder_template"):
                 logger.error(
-                    "Coder backend selected but CODER_URL, CODER_API_KEY, and CODER_WORKSPACE must all be set."
-                )
-                return False
-            if not _coder_workspace_exists(
-                base_url=config["coder_url"],
-                workspace=config["coder_workspace"],
-                api_key=config["coder_api_key"],
-                timeout=int(config.get("timeout", 60)),
-            ):
-                logger.error(
-                    "Coder backend selected but workspace %r was not found or was not accessible via %s/api/v2/workspaces/{workspace}.",
-                    config["coder_workspace"],
-                    config["coder_url"].rstrip("/"),
+                    "Coder backend selected but CODER_URL, CODER_API_KEY, and CODER_TEMPLATE must all be set."
                 )
                 return False
             return True
