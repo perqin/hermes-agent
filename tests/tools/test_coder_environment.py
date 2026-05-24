@@ -43,20 +43,23 @@ def test_get_env_config_reads_coder_values(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://coder.example")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_TEMPLATE", "template-uuid")
+    monkeypatch.setenv("CODER_ORGANIZATION", "acme")
+    monkeypatch.setenv("CODER_TEMPLATE", "devcontainer")
 
     config = terminal_tool_module._get_env_config()
 
     assert config["env_type"] == "coder"
     assert config["coder_url"] == "https://coder.example"
     assert config["coder_api_key"] == "secret-token"
-    assert config["coder_template"] == "template-uuid"
+    assert config["coder_organization"] == "acme"
+    assert config["coder_template"] == "devcontainer"
 
 
 def test_get_env_config_defaults_to_local_without_terminal_env(monkeypatch):
     monkeypatch.delenv("TERMINAL_ENV", raising=False)
     monkeypatch.delenv("CODER_URL", raising=False)
     monkeypatch.delenv("CODER_API_KEY", raising=False)
+    monkeypatch.delenv("CODER_ORGANIZATION", raising=False)
     monkeypatch.delenv("CODER_TEMPLATE", raising=False)
 
     config = terminal_tool_module._get_env_config()
@@ -67,15 +70,18 @@ def test_get_env_config_defaults_to_local_without_terminal_env(monkeypatch):
 def test_get_env_config_uses_env_bridged_coder_values(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://configured.example")
+    monkeypatch.setenv("CODER_ORGANIZATION", "configured-org")
     monkeypatch.setenv("CODER_TEMPLATE", "configured-template")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
 
     config = terminal_tool_module._get_env_config()
 
     assert config["coder_url"] == "https://configured.example"
+    assert config["coder_organization"] == "configured-org"
     assert config["coder_template"] == "configured-template"
     assert config["coder_api_key"] == "secret-token"
     assert config["coder_url"] == terminal_tool_module.os.getenv("CODER_URL")
+    assert config["coder_organization"] == terminal_tool_module.os.getenv("CODER_ORGANIZATION")
     assert config["coder_template"] == terminal_tool_module.os.getenv("CODER_TEMPLATE")
 
 
@@ -92,7 +98,8 @@ def test_create_environment_constructs_coder_backend(monkeypatch):
         container_config={
             "coder_url": "https://coder.example",
             "coder_api_key": "secret-token",
-            "coder_template": "template-uuid",
+            "coder_organization": "acme",
+            "coder_template": "devcontainer",
         },
         task_id="task-coder",
     )
@@ -100,9 +107,10 @@ def test_create_environment_constructs_coder_backend(monkeypatch):
     assert result is sentinel
     ctor.assert_called_once_with(
         base_url="https://coder.example",
-        template_id="template-uuid",
+        template_name="devcontainer",
         task_id="task-coder",
         api_key="secret-token",
+        organization_name="acme",
         cwd="/root",
         timeout=30,
     )
@@ -129,7 +137,7 @@ def test_coder_requirements_with_template_only_passes(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://coder.example")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_TEMPLATE", "template-uuid")
+    monkeypatch.setenv("CODER_TEMPLATE", "devcontainer")
 
     assert terminal_tool_module.check_terminal_requirements() is True
 
@@ -165,7 +173,7 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
         side_effect=[
             _FakeResponse({"workspaces": []}),
             _FakeResponse([{"id": "org-123", "is_default": True}]),
-            _FakeResponse(workspace_created),
+            _FakeResponse({"id": "template-uuid", "name": "devcontainer"}),
             _FakeResponse(workspace_created),
         ]
     )
@@ -181,7 +189,7 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
 
     env = CoderEnvironment(
         base_url="https://coder.example",
-        template_id="template-uuid",
+        template_name="devcontainer",
         task_id="20260521_180000_ef3456",
         api_key="secret-token",
         cwd="/root",
@@ -211,6 +219,49 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
     assert pty_command.startswith("bash -lc ")
     assert "echo hello-from-hermes" in pty_command
     assert pty_command != "pwd"
+
+
+def test_coder_environment_create_workspace_uses_configured_organization_name(monkeypatch):
+    workspace_created = {"id": "workspace-123", "name": "hermes-20260521-173045-ab12cd"}
+    requests_get = MagicMock(
+        side_effect=[
+            _FakeResponse({"workspaces": []}),
+            _FakeResponse({"id": "org-123", "name": "acme"}),
+            _FakeResponse({"id": "template-uuid", "name": "devcontainer"}),
+        ]
+    )
+    requests_post = MagicMock(return_value=_FakeResponse(workspace_created, status_code=201))
+
+    monkeypatch.setattr("tools.environments.coder.requests.get", requests_get)
+    monkeypatch.setattr("tools.environments.coder.requests.post", requests_post)
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        organization_name="acme",
+        timeout=5,
+    )
+
+    assert env._ensure_workspace() == workspace_created
+    called_urls = [call.args[0] for call in requests_get.call_args_list]
+    assert "https://coder.example/api/v2/users/me/organizations/acme" in called_urls
+    assert "https://coder.example/api/v2/organizations/org-123/templates/devcontainer" in called_urls
+    requests_post.assert_called_once_with(
+        "https://coder.example/api/v2/organizations/org-123/members/me/workspaces",
+        headers={
+            "Coder-Session-Token": "secret-token",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={"name": "hermes-20260521-173045-ab12cd", "template_id": "template-uuid"},
+        timeout=5,
+    )
 
 
 def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
@@ -252,7 +303,7 @@ def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
 
     env = CoderEnvironment(
         base_url="https://coder.example",
-        template_id="template-uuid",
+        template_name="devcontainer",
         task_id="20260521_180000_ef3456",
         api_key="secret-token",
     )
@@ -283,7 +334,8 @@ def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "coder")
     monkeypatch.setenv("CODER_URL", "https://coder.example")
     monkeypatch.setenv("CODER_API_KEY", "secret-token")
-    monkeypatch.setenv("CODER_TEMPLATE", "template-uuid")
+    monkeypatch.setenv("CODER_ORGANIZATION", "acme")
+    monkeypatch.setenv("CODER_TEMPLATE", "devcontainer")
 
     payload = json.loads(terminal_tool_module.terminal_tool(command="printf 'hi from coder'", task_id="coder-test"))
 
@@ -291,4 +343,5 @@ def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch)
     create_env.assert_called_once()
     assert create_env.call_args.kwargs["container_config"]["coder_url"] == "https://coder.example"
     assert create_env.call_args.kwargs["container_config"]["coder_api_key"] == "secret-token"
-    assert create_env.call_args.kwargs["container_config"]["coder_template"] == "template-uuid"
+    assert create_env.call_args.kwargs["container_config"]["coder_organization"] == "acme"
+    assert create_env.call_args.kwargs["container_config"]["coder_template"] == "devcontainer"

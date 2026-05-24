@@ -122,6 +122,7 @@ if _config_path.exists():
             _terminal_env_map = {
                 "backend": "TERMINAL_ENV",
                 "coder_url": "CODER_URL",
+                "coder_organization": "CODER_ORGANIZATION",
                 "coder_template": "CODER_TEMPLATE",
                 "cwd": "TERMINAL_CWD",
                 "timeout": "TERMINAL_TIMEOUT",

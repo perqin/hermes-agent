@@ -621,6 +621,7 @@ def _get_env_config() -> Dict[str, Any]:
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
     coder_url = os.getenv("CODER_URL", "")
     coder_api_key = os.getenv("CODER_API_KEY", "")
+    coder_organization = os.getenv("CODER_ORGANIZATION", "")
     coder_template = os.getenv("CODER_TEMPLATE", "")
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
@@ -664,6 +665,7 @@ def _get_env_config() -> Dict[str, Any]:
         # Coder-specific config
         "coder_url": coder_url,
         "coder_api_key": coder_api_key,
+        "coder_organization": coder_organization,
         "coder_template": coder_template,
         # Persistent shell: SSH defaults to the config-level persistent_shell
         # setting (true by default for non-local backends); local is always opt-in.
@@ -821,9 +823,10 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             raise ValueError("Coder environment requires CODER_URL, CODER_API_KEY, and CODER_TEMPLATE")
         return _CoderEnvironment(
             base_url=cc["coder_url"],
-            template_id=cc["coder_template"],
+            template_name=cc["coder_template"],
             task_id=task_id,
             api_key=cc["coder_api_key"],
+            organization_name=cc.get("coder_organization") or None,
             cwd=cwd,
             timeout=timeout,
         )
@@ -1272,6 +1275,7 @@ def terminal_tool(
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                                 "coder_url": config.get("coder_url", ""),
                                 "coder_api_key": config.get("coder_api_key", ""),
+                                "coder_organization": config.get("coder_organization", ""),
                                 "coder_template": config.get("coder_template", ""),
                             }
 

@@ -380,6 +380,7 @@ DEFAULT_CONFIG = {
         "backend": "local",
         "modal_mode": "auto",
         "coder_url": "",
+        "coder_organization": "",
         "coder_template": "",
         "cwd": ".",  # Use current directory
         "timeout": 180,
@@ -3419,9 +3420,11 @@ def show_config():
         print(f"  SSH user:     {ssh_user or '(not set)'}")
     elif terminal.get('backend') == 'coder':
         coder_url = str(terminal.get('coder_url') or get_env_value('CODER_URL') or '')
+        coder_organization = str(terminal.get('coder_organization') or get_env_value('CODER_ORGANIZATION') or '')
         coder_template = str(terminal.get('coder_template') or get_env_value('CODER_TEMPLATE') or '')
         coder_api_key = get_env_value('CODER_API_KEY')
         print(f"  Coder URL:    {coder_url or '(not set)'}")
+        print(f"  Organization: {coder_organization or '(default)'}")
         print(f"  Template:     {coder_template or '(not set)'}")
         print(f"  API key:      {'configured' if coder_api_key else '(not set)'}")
     
@@ -3608,6 +3611,7 @@ def set_config_value(key: str, value: str):
         "terminal.backend": "TERMINAL_ENV",
         "terminal.modal_mode": "TERMINAL_MODAL_MODE",
         "terminal.coder_url": "CODER_URL",
+        "terminal.coder_organization": "CODER_ORGANIZATION",
         "terminal.coder_template": "CODER_TEMPLATE",
         "terminal.docker_image": "TERMINAL_DOCKER_IMAGE",
         "terminal.singularity_image": "TERMINAL_SINGULARITY_IMAGE",
