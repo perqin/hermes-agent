@@ -229,6 +229,7 @@ class CoderEnvironment(BaseEnvironment):
         task_id: str,
         api_key: str,
         organization_name: str | None = None,
+        workspace_name: str | None = None,
         cwd: str = "~",
         timeout: int = 60,
     ):
@@ -237,7 +238,7 @@ class CoderEnvironment(BaseEnvironment):
         self.template_name = template_name
         self.organization_name = organization_name or None
         self.task_id = task_id
-        self.workspace = coder_workspace_name_for_task(task_id)
+        self.workspace = workspace_name or coder_workspace_name_for_task(task_id)
         self.api_key = api_key
         self._workspace_id: str | None = None
 

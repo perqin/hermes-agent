@@ -123,6 +123,7 @@ if _config_path.exists():
                 "backend": "TERMINAL_ENV",
                 "coder_url": "CODER_URL",
                 "coder_organization": "CODER_ORGANIZATION",
+                "coder_workspace": "CODER_WORKSPACE",
                 "coder_template": "CODER_TEMPLATE",
                 "cwd": "TERMINAL_CWD",
                 "timeout": "TERMINAL_TIMEOUT",

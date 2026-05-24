@@ -33,6 +33,7 @@ def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
             "backend": "TERMINAL_ENV",
             "coder_url": "CODER_URL",
             "coder_organization": "CODER_ORGANIZATION",
+            "coder_workspace": "CODER_WORKSPACE",
             "coder_template": "CODER_TEMPLATE",
             "cwd": "TERMINAL_CWD",
             "timeout": "TERMINAL_TIMEOUT",
@@ -215,6 +216,7 @@ class TestNestedTerminalCwdPlaceholderSkip:
                 "backend": "coder",
                 "coder_url": "https://coder.example",
                 "coder_organization": "acme",
+                "coder_workspace": "shared-dev",
                 "coder_template": "devcontainer",
             }
         }
@@ -222,4 +224,5 @@ class TestNestedTerminalCwdPlaceholderSkip:
         assert result["TERMINAL_ENV"] == "coder"
         assert result["CODER_URL"] == "https://coder.example"
         assert result["CODER_ORGANIZATION"] == "acme"
+        assert result["CODER_WORKSPACE"] == "shared-dev"
         assert result["CODER_TEMPLATE"] == "devcontainer"
