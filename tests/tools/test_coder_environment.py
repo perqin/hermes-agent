@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import MagicMock
 
@@ -259,6 +260,60 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
     assert pty_command.startswith("bash -lc ")
     assert "echo hello-from-hermes" in pty_command
     assert pty_command != "pwd"
+
+
+def test_coder_process_kill_sends_ctrl_c_to_active_pty(monkeypatch):
+    connected = threading.Event()
+    closed = threading.Event()
+
+    class _BlockingWebSocket:
+        def __init__(self):
+            self.sent = []
+            self.closed = False
+
+        def __enter__(self):
+            connected.set()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+            return False
+
+        def recv(self, timeout=None, decode=None):
+            closed.wait(timeout=2)
+            raise EOFError
+
+        def send(self, message):
+            self.sent.append(message)
+
+        def close(self):
+            self.closed = True
+            closed.set()
+
+    fake_ws = _BlockingWebSocket()
+    monkeypatch.setattr("tools.environments.coder.connect", MagicMock(return_value=fake_ws))
+    monkeypatch.setattr(CoderEnvironment, "_resolve_agent_id", lambda self: "agent-123")
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+    )
+
+    handle = env._run_bash("sleep 999", timeout=5)
+    assert connected.wait(timeout=2)
+
+    handle.kill()
+    handle.wait(timeout=2)
+
+    assert fake_ws.sent == [b"\x03"]
+    assert fake_ws.closed is True
 
 
 def test_coder_environment_create_workspace_uses_configured_workspace_and_organization(monkeypatch):

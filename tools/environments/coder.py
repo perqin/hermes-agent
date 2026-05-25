@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import threading
 import time
 import urllib.parse
 import uuid
@@ -388,7 +389,30 @@ class CoderEnvironment(BaseEnvironment):
             )
         )
 
-    def _execute_via_pty(self, cmd_string: str, *, login: bool) -> tuple[str, int]:
+    @staticmethod
+    def _interrupt_pty(websocket) -> None:
+        """Send Ctrl+C to a Coder PTY websocket and close it.
+
+        Coder's PTY endpoint carries raw terminal input over the websocket; the
+        terminal interrupt character is ETX (0x03).  Closing after sending it
+        unblocks the local reader even if the remote process takes time to exit.
+        """
+        try:
+            websocket.send(b"\x03")
+        except Exception:
+            pass
+        try:
+            websocket.close()
+        except Exception:
+            pass
+
+    def _execute_via_pty(
+        self,
+        cmd_string: str,
+        *,
+        login: bool,
+        cancel_state: dict | None = None,
+    ) -> tuple[str, int]:
         agent_id = self._resolve_agent_id()
         pty_command = self._pty_command(cmd_string, login=login)
         pty_url = self._pty_url(agent_id, command=pty_command)
@@ -400,18 +424,33 @@ class CoderEnvironment(BaseEnvironment):
             open_timeout=self.timeout,
             close_timeout=1,
         ) as websocket:
-            while True:
-                try:
-                    message = websocket.recv(timeout=self.timeout, decode=False)
-                except EOFError:
-                    break
-                except ConnectionClosed:
-                    break
+            should_interrupt = False
+            if cancel_state is not None:
+                lock = cancel_state["lock"]
+                with lock:
+                    cancel_state["websocket"] = websocket
+                    should_interrupt = bool(cancel_state.get("cancelled"))
+            if should_interrupt:
+                self._interrupt_pty(websocket)
 
-                if isinstance(message, bytes):
-                    output_parts.append(message.decode("utf-8", errors="replace"))
-                else:
-                    output_parts.append(message)
+            try:
+                while True:
+                    try:
+                        message = websocket.recv(timeout=self.timeout, decode=False)
+                    except EOFError:
+                        break
+                    except ConnectionClosed:
+                        break
+
+                    if isinstance(message, bytes):
+                        output_parts.append(message.decode("utf-8", errors="replace"))
+                    else:
+                        output_parts.append(message)
+            finally:
+                if cancel_state is not None:
+                    with cancel_state["lock"]:
+                        if cancel_state.get("websocket") is websocket:
+                            cancel_state["websocket"] = None
 
         return "".join(output_parts), 0
 
@@ -424,7 +463,20 @@ class CoderEnvironment(BaseEnvironment):
         stdin_data: str | None = None,
     ):
         del timeout, stdin_data
-        return _ThreadedProcessHandle(lambda: self._execute_via_pty(cmd_string, login=login))
+        cancel_state = {"lock": threading.Lock(), "websocket": None, "cancelled": False}
+
+        def cancel_pty() -> None:
+            websocket = None
+            with cancel_state["lock"]:
+                cancel_state["cancelled"] = True
+                websocket = cancel_state.get("websocket")
+            if websocket is not None:
+                self._interrupt_pty(websocket)
+
+        return _ThreadedProcessHandle(
+            lambda: self._execute_via_pty(cmd_string, login=login, cancel_state=cancel_state),
+            cancel_fn=cancel_pty,
+        )
 
     def cleanup(self):
         return None
