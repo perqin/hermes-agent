@@ -233,6 +233,7 @@ class CoderEnvironment(BaseEnvironment):
         workspace_name: str | None = None,
         cwd: str = "~",
         timeout: int = 60,
+        init_session: bool = True,
     ):
         super().__init__(cwd=cwd, timeout=timeout)
         self.base_url = base_url.rstrip("/")
@@ -242,6 +243,13 @@ class CoderEnvironment(BaseEnvironment):
         self.workspace = workspace_name or coder_workspace_name_for_task(task_id)
         self.api_key = api_key
         self._workspace_id: str | None = None
+
+        # Safe to call here: init_session() uses _run_bash() directly, which
+        # resolves the workspace/agent and opens a PTY without going back
+        # through BaseEnvironment.execute(), so there is no recursive wrapping
+        # or re-entry into init_session().
+        if init_session:
+            self.init_session()
 
     def _headers(self) -> dict[str, str]:
         return _coder_headers(self.api_key)

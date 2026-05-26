@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import threading
 import uuid
 from urllib.parse import parse_qs, urlparse
@@ -168,6 +169,113 @@ def test_workspace_name_uses_lineage_root(tmp_path, monkeypatch):
     )
 
 
+def test_coder_environment_initializes_session_snapshot_without_recursive_execute(monkeypatch):
+    workspace_payload = {
+        "id": "workspace-123",
+        "name": "shared-dev",
+        "latest_build": {
+            "transition": "start",
+            "resources": [{"agents": [{"id": "agent-123"}]}],
+        },
+    }
+    requests_get = MagicMock(
+        side_effect=[
+            _FakeResponse({"workspaces": [workspace_payload]}),
+            _FakeResponse(workspace_payload),
+            _FakeResponse({"workspaces": [workspace_payload]}),
+            _FakeResponse(workspace_payload),
+        ]
+    )
+    connect_urls = []
+
+    def fake_connect(url, **_kwargs):
+        connect_urls.append(url)
+        query = parse_qs(urlparse(url).query)
+        reconnect_id = query["reconnect"][0]
+        exit_marker = f"__HERMES_EXIT_{reconnect_id}__"
+        command = query["command"][0]
+        cwd_match = re.search(r"__HERMES_CWD_[0-9a-f]{12}__", command)
+        assert cwd_match is not None
+        cwd_marker = cwd_match.group(0)
+        return _FakeWebSocket([f"\n{cwd_marker}/home/coder{cwd_marker}\n\n{exit_marker}0{exit_marker}\n".encode()])
+
+    monkeypatch.setattr("tools.environments.coder.requests.get", requests_get)
+    monkeypatch.setattr("tools.environments.coder.requests.post", MagicMock())
+    monkeypatch.setattr("tools.environments.coder.connect", fake_connect)
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "shared-dev",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        workspace_name="shared-dev",
+        timeout=5,
+    )
+
+    assert env._snapshot_ready is True
+    assert env.cwd == "/home/coder"
+    assert len(connect_urls) == 1
+    init_query = parse_qs(urlparse(connect_urls[0]).query)
+    init_command = init_query["command"][0]
+    assert init_command.startswith("bash -c ")
+    assert "bash -lc" in init_command
+    assert "export -p" in init_command
+    assert "declare -f" in init_command
+
+    env.execute("printf $HERMES_CODER_SNAPSHOT_TEST")
+
+    assert len(connect_urls) == 2
+    followup_query = parse_qs(urlparse(connect_urls[1]).query)
+    followup_command = followup_query["command"][0]
+    assert f"source {env._snapshot_path}" in followup_command
+    assert f"export -p > {env._snapshot_path}" in followup_command
+    assert "printf $HERMES_CODER_SNAPSHOT_TEST" in followup_command
+
+
+def test_coder_environment_leaves_snapshot_unready_when_init_session_fails(monkeypatch):
+    workspace_payload = {
+        "id": "workspace-123",
+        "name": "shared-dev",
+        "latest_build": {
+            "transition": "start",
+            "resources": [{"agents": [{"id": "agent-123"}]}],
+        },
+    }
+    monkeypatch.setattr(
+        "tools.environments.coder.requests.get",
+        MagicMock(
+            side_effect=[
+                _FakeResponse({"workspaces": [workspace_payload]}),
+                _FakeResponse(workspace_payload),
+            ]
+        ),
+    )
+    monkeypatch.setattr("tools.environments.coder.requests.post", MagicMock())
+    monkeypatch.setattr(
+        "tools.environments.coder.connect",
+        MagicMock(return_value=_FakeWebSocket([b"init failed without exit marker\n"])),
+    )
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "shared-dev",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        workspace_name="shared-dev",
+        timeout=5,
+    )
+
+    assert env._snapshot_ready is False
+
+
 def test_coder_environment_uses_configured_workspace_without_session_derivation(monkeypatch):
     existing_workspace = {"id": "workspace-123", "name": "shared-dev"}
     requests_get = MagicMock(return_value=_FakeResponse({"workspaces": [existing_workspace]}))
@@ -187,6 +295,7 @@ def test_coder_environment_uses_configured_workspace_without_session_derivation(
         api_key="secret-token",
         workspace_name="shared-dev",
         timeout=5,
+        init_session=False,
     )
 
     assert env.workspace == "shared-dev"
@@ -239,6 +348,7 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
         api_key="secret-token",
         cwd="/root",
         timeout=5,
+        init_session=False,
     )
 
     result = env.execute("echo hello-from-hermes")
@@ -290,6 +400,7 @@ def test_coder_environment_returns_nonzero_exit_code_from_pty_marker(monkeypatch
         task_id="20260521_180000_ef3456",
         api_key="secret-token",
         timeout=5,
+        init_session=False,
     )
 
     result = env.execute("exit 42")
@@ -317,6 +428,7 @@ def test_coder_environment_missing_exit_marker_returns_backend_error(monkeypatch
         task_id="20260521_180000_ef3456",
         api_key="secret-token",
         timeout=5,
+        init_session=False,
     )
 
     result = env.execute("echo no-marker")
@@ -368,6 +480,7 @@ def test_coder_process_kill_sends_ctrl_c_to_active_pty(monkeypatch):
         task_id="20260521_180000_ef3456",
         api_key="secret-token",
         timeout=5,
+        init_session=False,
     )
 
     handle = env._run_bash("sleep 999", timeout=5)
@@ -406,6 +519,7 @@ def test_coder_environment_create_workspace_uses_configured_workspace_and_organi
         organization_name="acme",
         workspace_name="shared-dev",
         timeout=5,
+        init_session=False,
     )
 
     assert env._ensure_workspace() == workspace_created
@@ -466,6 +580,7 @@ def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
         template_name="devcontainer",
         task_id="20260521_180000_ef3456",
         api_key="secret-token",
+        init_session=False,
     )
 
     assert env._resolve_agent_id() == "agent-123"
