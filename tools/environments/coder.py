@@ -363,16 +363,46 @@ class CoderEnvironment(BaseEnvironment):
                     return agent_id
         raise RuntimeError(f"No workspace agent found for Coder workspace {self.workspace!r}")
 
-    def _pty_command(self, cmd_string: str, *, login: bool) -> str:
-        shell_flag = "-lc" if login else "-c"
-        return f"bash {shell_flag} {shlex.quote(cmd_string)}"
+    @staticmethod
+    def _exit_marker(reconnect_id: str) -> str:
+        return f"__HERMES_EXIT_{reconnect_id}__"
 
-    def _pty_url(self, agent_id: str, *, command: str) -> str:
+    @staticmethod
+    def _extract_exit_code(output: str, exit_marker: str) -> tuple[str, int]:
+        pattern = re.compile(
+            rf"(?:\r?\n)?{re.escape(exit_marker)}(\d{{1,3}}){re.escape(exit_marker)}\r?\n?"
+        )
+        matches = list(pattern.finditer(output))
+        if not matches:
+            warning = "[Coder PTY exit marker missing]"
+            separator = "\n" if output and not output.endswith("\n") else ""
+            return f"{output}{separator}{warning}", 1
+
+        match = matches[-1]
+        exit_code = int(match.group(1))
+        if not 0 <= exit_code <= 255:
+            exit_code = 1
+        cleaned = output[: match.start()] + output[match.end() :]
+        return cleaned, exit_code
+
+    def _pty_command(self, cmd_string: str, *, login: bool, exit_marker: str) -> str:
+        inner_shell_flag = "-lc" if login else "-c"
+        capture_script = "\n".join(
+            [
+                f"bash {inner_shell_flag} {shlex.quote(cmd_string)}",
+                "__coder_ec=$?",
+                f"printf '\\n{exit_marker}%s{exit_marker}\\n' \"$__coder_ec\"",
+                "exit \"$__coder_ec\"",
+            ]
+        )
+        return f"bash -c {shlex.quote(capture_script)}"
+
+    def _pty_url(self, agent_id: str, *, command: str, reconnect_id: str) -> str:
         parsed = urllib.parse.urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         query = urllib.parse.urlencode(
             {
-                "reconnect": str(uuid.uuid4()),
+                "reconnect": reconnect_id,
                 "command": command,
                 "height": 80,
                 "width": 80,
@@ -414,8 +444,10 @@ class CoderEnvironment(BaseEnvironment):
         cancel_state: dict | None = None,
     ) -> tuple[str, int]:
         agent_id = self._resolve_agent_id()
-        pty_command = self._pty_command(cmd_string, login=login)
-        pty_url = self._pty_url(agent_id, command=pty_command)
+        reconnect_id = str(uuid.uuid4())
+        exit_marker = self._exit_marker(reconnect_id)
+        pty_command = self._pty_command(cmd_string, login=login, exit_marker=exit_marker)
+        pty_url = self._pty_url(agent_id, command=pty_command, reconnect_id=reconnect_id)
         output_parts: list[str] = []
 
         with connect(
@@ -452,7 +484,7 @@ class CoderEnvironment(BaseEnvironment):
                         if cancel_state.get("websocket") is websocket:
                             cancel_state["websocket"] = None
 
-        return "".join(output_parts), 0
+        return self._extract_exit_code("".join(output_parts), exit_marker)
 
     def _run_bash(
         self,

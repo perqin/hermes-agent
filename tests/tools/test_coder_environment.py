@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+import uuid
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import MagicMock
 
@@ -208,7 +209,9 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
             "resources": [{"agents": [{"id": "agent-123"}]}],
         },
     }
-    fake_ws = _FakeWebSocket([b"hello from coder\n"])
+    reconnect_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    exit_marker = f"__HERMES_EXIT_{reconnect_id}__"
+    fake_ws = _FakeWebSocket([f"hello from coder\n\n{exit_marker}0{exit_marker}\n".encode()])
     connect_mock = MagicMock(return_value=fake_ws)
     requests_get = MagicMock(
         side_effect=[
@@ -223,6 +226,7 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
     monkeypatch.setattr("tools.environments.coder.requests.get", requests_get)
     monkeypatch.setattr("tools.environments.coder.requests.post", requests_post)
     monkeypatch.setattr("tools.environments.coder.connect", connect_mock)
+    monkeypatch.setattr("tools.environments.coder.uuid.uuid4", lambda: reconnect_id)
     monkeypatch.setattr(
         "tools.environments.coder.coder_workspace_name_for_task",
         lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
@@ -256,10 +260,70 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
     assert connect_kwargs["additional_headers"]["Coder-Session-Token"] == "secret-token"
     connect_url = connect_mock.call_args.args[0]
     assert "/api/v2/workspaceagents/agent-123/pty" in connect_url
-    pty_command = parse_qs(urlparse(connect_url).query)["command"][0]
-    assert pty_command.startswith("bash -lc ")
+    query = parse_qs(urlparse(connect_url).query)
+    assert query["reconnect"] == [str(reconnect_id)]
+    pty_command = query["command"][0]
+    assert pty_command.startswith("bash -c ")
+    assert f"{exit_marker}%s{exit_marker}" in pty_command
+    assert "bash -lc" in pty_command
     assert "echo hello-from-hermes" in pty_command
     assert pty_command != "pwd"
+
+
+def test_coder_environment_returns_nonzero_exit_code_from_pty_marker(monkeypatch):
+    reconnect_id = uuid.UUID("87654321-4321-6789-4321-678987654321")
+    exit_marker = f"__HERMES_EXIT_{reconnect_id}__"
+    fake_ws = _FakeWebSocket([f"failure output\r\n{exit_marker}42{exit_marker}\r\n".encode()])
+    connect_mock = MagicMock(return_value=fake_ws)
+
+    monkeypatch.setattr("tools.environments.coder.connect", connect_mock)
+    monkeypatch.setattr("tools.environments.coder.uuid.uuid4", lambda: reconnect_id)
+    monkeypatch.setattr(CoderEnvironment, "_resolve_agent_id", lambda self: "agent-123")
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+    )
+
+    result = env.execute("exit 42")
+
+    assert result["returncode"] == 42
+    assert result["output"] == "failure output"
+    connect_url = connect_mock.call_args.args[0]
+    query = parse_qs(urlparse(connect_url).query)
+    assert query["reconnect"] == [str(reconnect_id)]
+    assert exit_marker in query["command"][0]
+
+
+def test_coder_environment_missing_exit_marker_returns_backend_error(monkeypatch):
+    fake_ws = _FakeWebSocket([b"plain output without marker\n"])
+    monkeypatch.setattr("tools.environments.coder.connect", MagicMock(return_value=fake_ws))
+    monkeypatch.setattr(CoderEnvironment, "_resolve_agent_id", lambda self: "agent-123")
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+    )
+
+    result = env.execute("echo no-marker")
+
+    assert result["returncode"] == 1
+    assert "plain output without marker" in result["output"]
+    assert "[Coder PTY exit marker missing]" in result["output"]
 
 
 def test_coder_process_kill_sends_ctrl_c_to_active_pty(monkeypatch):
