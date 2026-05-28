@@ -242,9 +242,38 @@ Relevant Coder APIs:
 
 Protocol shape:
 
-- client -> server: JSON control messages such as `{ "data": "..." }` and `{ "height": ..., "width": ... }`
+- client -> server: **binary WebSocket frames carrying JSON payloads** (not text frames)
+  - input: `{ "data": "..." }`
+  - resize: `{ "height": ..., "width": ... }`
 - server -> client: raw PTY byte stream (terminal output, including ANSI control sequences)
 - the PTY stream should be parsed into a screen model with `pyte` or equivalent so Hermes can reason about visible text
+
+### Stdin feasibility result (validated)
+
+Hermes validated protocol-level stdin on a real Coder workspace using the configured `hermes-dev` profile credentials.
+
+Observed behavior from the probe:
+
+- sending JSON as **text frames** fails with close code `1003` (`unexpected frame type ... expected MessageBinary`)
+- sending raw binary bytes without JSON control framing does not produce usable stdin semantics
+- sending JSON payloads as **binary frames** works:
+  - `{ "data": "<stdin payload>" }` is consumed by the remote command
+  - `{ "data": "\u0004" }` (Ctrl+D / EOT) acts as EOF for stdin-driven commands
+  - command exits normally and shell-level exit marker returns `0`
+
+Practical implication for `CoderEnvironment` stdin support:
+
+- do **not** rely on heredoc for Coder stdin as the primary path
+- implement stdin by writing protocol input frames over the PTY websocket:
+  1. open PTY websocket with wrapped command
+  2. send stdin payload in one or more binary JSON `data` frames
+  3. send EOF via binary JSON `{"data":"\u0004"}`
+  4. continue receiving output until exit marker is observed / stream closes
+
+Notes:
+
+- chunk large stdin payloads to avoid websocket message-size limits
+- keep shell-level exit marker parsing (already used for PTY exit code recovery)
 
 Implications for Hermes:
 
