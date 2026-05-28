@@ -1,6 +1,8 @@
 import importlib
 import logging
 
+import pytest
+
 terminal_tool_module = importlib.import_module("tools.terminal_tool")
 
 
@@ -8,9 +10,17 @@ def _clear_terminal_env(monkeypatch):
     """Remove terminal env vars that could affect requirements checks."""
     keys = [
         "TERMINAL_ENV",
+        "TERMINAL_CONTAINER_CPU",
+        "TERMINAL_CONTAINER_DISK",
+        "TERMINAL_CONTAINER_MEMORY",
+        "TERMINAL_DOCKER_FORWARD_ENV",
+        "TERMINAL_DOCKER_VOLUMES",
+        "TERMINAL_LIFETIME_SECONDS",
         "TERMINAL_MODAL_MODE",
         "TERMINAL_SSH_HOST",
+        "TERMINAL_SSH_PORT",
         "TERMINAL_SSH_USER",
+        "TERMINAL_TIMEOUT",
         "MODAL_TOKEN_ID",
         "MODAL_TOKEN_SECRET",
         "HOME",
