@@ -594,7 +594,7 @@ def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
 
 def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch):
     class _FakeEnv:
-        def execute(self, command, timeout=None, workdir=None, pty=False):
+        def execute(self, command, timeout=None, cwd=None, pty=False, **kwargs):
             assert command == "printf 'hi from coder'"
             return {"output": "hi from coder", "returncode": 0}
 
