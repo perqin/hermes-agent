@@ -380,6 +380,45 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
     assert pty_command != "pwd"
 
 
+def test_coder_environment_stdin_data_uses_binary_json_frames_and_eof(monkeypatch):
+    reconnect_id = uuid.UUID("11111111-2222-3333-4444-555555555555")
+    exit_marker = f"__HERMES_EXIT_{reconnect_id}__"
+
+    class _SendingWebSocket(_FakeWebSocket):
+        def __init__(self, messages):
+            super().__init__(messages)
+            self.sent = []
+
+        def send(self, message):
+            self.sent.append(message)
+
+    fake_ws = _SendingWebSocket([f"ok\n\n{exit_marker}0{exit_marker}\n".encode()])
+    connect_mock = MagicMock(return_value=fake_ws)
+
+    monkeypatch.setattr("tools.environments.coder.connect", connect_mock)
+    monkeypatch.setattr("tools.environments.coder.uuid.uuid4", lambda: reconnect_id)
+    monkeypatch.setattr(CoderEnvironment, "_resolve_agent_id", lambda self: "agent-123")
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+        init_session=False,
+    )
+
+    result = env.execute("cat > /tmp/out.txt", stdin_data="hello stdin")
+
+    assert result["returncode"] == 0
+    sent_payloads = [json.loads(frame.decode("utf-8")) for frame in fake_ws.sent]
+    assert sent_payloads == [{"data": "hello stdin"}, {"data": "\u0004"}]
+
+
 def test_coder_environment_returns_nonzero_exit_code_from_pty_marker(monkeypatch):
     reconnect_id = uuid.UUID("87654321-4321-6789-4321-678987654321")
     exit_marker = f"__HERMES_EXIT_{reconnect_id}__"
@@ -489,7 +528,7 @@ def test_coder_process_kill_sends_ctrl_c_to_active_pty(monkeypatch):
     handle.kill()
     handle.wait(timeout=2)
 
-    assert fake_ws.sent == [b"\x03"]
+    assert fake_ws.sent == [CoderEnvironment._stdin_frame("\u0003")]
     assert fake_ws.closed is True
 
 

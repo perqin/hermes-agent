@@ -11,6 +11,7 @@ Current intentional limitations for the bootstrap step:
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import threading
@@ -220,7 +221,8 @@ def coder_workspace_exists(*, base_url: str, workspace_name: str, api_key: str, 
 class CoderEnvironment(BaseEnvironment):
     """Execute commands inside a Coder workspace via the /pty websocket."""
 
-    _stdin_mode = "heredoc"
+    _stdin_mode = "passthrough"
+    _STDIN_CHUNK_SIZE = 32 * 1024
 
     def __init__(
         self,
@@ -427,16 +429,32 @@ class CoderEnvironment(BaseEnvironment):
             )
         )
 
-    @staticmethod
-    def _interrupt_pty(websocket) -> None:
+    @classmethod
+    def _stdin_frame(cls, data: str) -> bytes:
+        return json.dumps({"data": data}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    @classmethod
+    def _send_stdin_data(cls, websocket, stdin_data: str) -> None:
+        if not stdin_data:
+            return
+        chunk_size = max(1, cls._STDIN_CHUNK_SIZE)
+        for start in range(0, len(stdin_data), chunk_size):
+            websocket.send(cls._stdin_frame(stdin_data[start : start + chunk_size]))
+
+    @classmethod
+    def _send_stdin_eof(cls, websocket) -> None:
+        # EOT / Ctrl+D signals EOF for stdin-driven commands.
+        websocket.send(cls._stdin_frame("\u0004"))
+
+    @classmethod
+    def _interrupt_pty(cls, websocket) -> None:
         """Send Ctrl+C to a Coder PTY websocket and close it.
 
-        Coder's PTY endpoint carries raw terminal input over the websocket; the
-        terminal interrupt character is ETX (0x03).  Closing after sending it
-        unblocks the local reader even if the remote process takes time to exit.
+        Coder PTY expects binary WebSocket frames that carry JSON payloads.
+        Interrupt is ETX (0x03) in the "data" field.
         """
         try:
-            websocket.send(b"\x03")
+            websocket.send(cls._stdin_frame("\u0003"))
         except Exception:
             pass
         try:
@@ -449,6 +467,7 @@ class CoderEnvironment(BaseEnvironment):
         cmd_string: str,
         *,
         login: bool,
+        stdin_data: str | None = None,
         cancel_state: dict | None = None,
     ) -> tuple[str, int]:
         agent_id = self._resolve_agent_id()
@@ -472,6 +491,10 @@ class CoderEnvironment(BaseEnvironment):
                     should_interrupt = bool(cancel_state.get("cancelled"))
             if should_interrupt:
                 self._interrupt_pty(websocket)
+
+            if stdin_data is not None:
+                self._send_stdin_data(websocket, stdin_data)
+                self._send_stdin_eof(websocket)
 
             try:
                 while True:
@@ -502,7 +525,7 @@ class CoderEnvironment(BaseEnvironment):
         timeout: int = 120,
         stdin_data: str | None = None,
     ):
-        del timeout, stdin_data
+        del timeout
         cancel_state = {"lock": threading.Lock(), "websocket": None, "cancelled": False}
 
         def cancel_pty() -> None:
@@ -514,7 +537,12 @@ class CoderEnvironment(BaseEnvironment):
                 self._interrupt_pty(websocket)
 
         return _ThreadedProcessHandle(
-            lambda: self._execute_via_pty(cmd_string, login=login, cancel_state=cancel_state),
+            lambda: self._execute_via_pty(
+                cmd_string,
+                login=login,
+                stdin_data=stdin_data,
+                cancel_state=cancel_state,
+            ),
             cancel_fn=cancel_pty,
         )
 
