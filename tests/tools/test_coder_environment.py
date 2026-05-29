@@ -94,6 +94,24 @@ def test_get_env_config_uses_env_bridged_coder_values(monkeypatch):
     assert config["coder_template"] == terminal_tool_module.os.getenv("CODER_TEMPLATE")
 
 
+def test_get_env_config_coder_discards_host_terminal_cwd(monkeypatch):
+    monkeypatch.setenv("TERMINAL_ENV", "coder")
+    monkeypatch.setenv("TERMINAL_CWD", "/Users/perqin-moego")
+
+    config = terminal_tool_module._get_env_config()
+
+    assert config["cwd"] == "~"
+
+
+def test_get_env_config_coder_defaults_to_remote_home_not_host_home(monkeypatch):
+    monkeypatch.setenv("TERMINAL_ENV", "coder")
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+    config = terminal_tool_module._get_env_config()
+
+    assert config["cwd"] == "~"
+
+
 def test_create_environment_constructs_coder_backend(monkeypatch):
     sentinel = object()
     ctor = MagicMock(return_value=sentinel)
