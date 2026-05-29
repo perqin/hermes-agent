@@ -423,6 +423,62 @@ class CoderEnvironment(BaseEnvironment):
             time.sleep(2)
         raise TimeoutError(f"Timed out waiting for Coder workspace build {build_id} to complete")
 
+    @staticmethod
+    def _agent_startup_ready(agent: dict) -> bool:
+        """Return True when an agent is ready for PTY execution.
+
+        Coder can expose a workspace agent before startup scripts finish. Polling
+        this state avoids racing websocket execution against in-progress startup
+        scripts.
+        """
+        startup_status = (
+            agent.get("startup_script_status")
+            or (agent.get("startup_script") or {}).get("status")
+            or ""
+        )
+        startup_status = str(startup_status).strip().lower()
+        if startup_status and startup_status not in {"passed", "succeeded", "success", "complete", "completed"}:
+            return False
+
+        lifecycle_state = (
+            agent.get("lifecycle_state")
+            or agent.get("status")
+            or ""
+        )
+        lifecycle_state = str(lifecycle_state).strip().lower()
+        if lifecycle_state in {"created", "starting", "connecting", "pending", "initializing"}:
+            return False
+
+        return True
+
+    def _wait_for_agent_ready(self, payload: dict) -> dict:
+        deadline = time.time() + max(self.timeout, 120)
+        while True:
+            latest_build = payload.get("latest_build") or {}
+            resources = latest_build.get("resources") or []
+            for resource in resources:
+                for agent in resource.get("agents") or []:
+                    agent_id = agent.get("id")
+                    if not agent_id:
+                        continue
+                    if self._agent_startup_ready(agent):
+                        return agent
+                    logger.debug(
+                        "[coder] agent not ready yet; waiting for startup completion: workspace=%s agent_id=%s startup_script_status=%s lifecycle_state=%s",
+                        self.workspace,
+                        agent_id,
+                        agent.get("startup_script_status") or (agent.get("startup_script") or {}).get("status"),
+                        agent.get("lifecycle_state") or agent.get("status"),
+                    )
+
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for Coder workspace agent startup for {self.workspace!r}"
+                )
+
+            time.sleep(2)
+            payload = self._get_workspace_payload()
+
     def _resolve_agent_id(self) -> str:
         logger.debug("[coder] resolving workspace agent id: workspace=%s", self.workspace)
         payload = self._get_workspace_payload()
@@ -449,26 +505,21 @@ class CoderEnvironment(BaseEnvironment):
             build_id = self._start_workspace(workspace_id)
             self._wait_for_build_completion(build_id)
             payload = self._get_workspace_payload()
-            latest_build = payload.get("latest_build") or {}
         else:
             job = latest_build.get("job") or {}
             if latest_build.get("id") and not job.get("completed_at"):
                 self._wait_for_build_completion(latest_build["id"])
                 payload = self._get_workspace_payload()
-                latest_build = payload.get("latest_build") or {}
 
-        resources = latest_build.get("resources") or []
-        for resource in resources:
-            agents = resource.get("agents") or []
-            if agents:
-                agent_id = agents[0].get("id")
-                if agent_id:
-                    logger.debug(
-                        "[coder] resolved workspace agent id: workspace=%s agent_id=%s",
-                        self.workspace,
-                        agent_id,
-                    )
-                    return agent_id
+        agent = self._wait_for_agent_ready(payload)
+        agent_id = agent.get("id")
+        if agent_id:
+            logger.debug(
+                "[coder] resolved workspace agent id: workspace=%s agent_id=%s",
+                self.workspace,
+                agent_id,
+            )
+            return agent_id
         raise RuntimeError(f"No workspace agent found for Coder workspace {self.workspace!r}")
 
     @staticmethod

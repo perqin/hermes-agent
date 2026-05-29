@@ -649,6 +649,76 @@ def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
     )
 
 
+def test_resolve_agent_id_waits_for_startup_script_completion_before_returning(monkeypatch):
+    base_workspace = {
+        "id": "workspace-123",
+        "name": "hermes-20260521-173045-ab12cd",
+    }
+    not_ready_workspace = {
+        **base_workspace,
+        "latest_build": {
+            "transition": "start",
+            "resources": [
+                {
+                    "agents": [
+                        {
+                            "id": "agent-123",
+                            "startup_script_status": "running",
+                            "lifecycle_state": "starting",
+                        }
+                    ]
+                }
+            ],
+        },
+    }
+    ready_workspace = {
+        **base_workspace,
+        "latest_build": {
+            "transition": "start",
+            "resources": [
+                {
+                    "agents": [
+                        {
+                            "id": "agent-123",
+                            "startup_script_status": "passed",
+                            "lifecycle_state": "ready",
+                        }
+                    ]
+                }
+            ],
+        },
+    }
+
+    requests_get = MagicMock(
+        side_effect=[
+            _FakeResponse({"workspaces": [base_workspace]}),
+            _FakeResponse(not_ready_workspace),
+            _FakeResponse({"workspaces": [base_workspace]}),
+            _FakeResponse(ready_workspace),
+        ]
+    )
+
+    monkeypatch.setattr("tools.environments.coder.requests.get", requests_get)
+    monkeypatch.setattr("tools.environments.coder.requests.post", MagicMock())
+    monkeypatch.setattr("tools.environments.coder.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+        init_session=False,
+    )
+
+    assert env._resolve_agent_id() == "agent-123"
+    assert requests_get.call_count == 4
+
+
 def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch):
     class _FakeEnv:
         def execute(self, command, timeout=None, cwd=None, pty=False, **kwargs):
