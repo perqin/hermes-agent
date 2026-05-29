@@ -597,7 +597,7 @@ def _get_or_create_env(task_id: str):
         cwd = overrides.get("cwd") or config["cwd"]
 
         container_config = None
-        if env_type in {"docker", "singularity", "modal", "daytona"}:
+        if env_type in {"docker", "singularity", "modal", "daytona", "coder"}:
             container_config = {
                 "container_cpu": config.get("container_cpu", 1),
                 "container_memory": config.get("container_memory", 5120),
@@ -605,6 +605,11 @@ def _get_or_create_env(task_id: str):
                 "container_persistent": config.get("container_persistent", True),
                 "docker_volumes": config.get("docker_volumes", []),
                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
+                "coder_url": config.get("coder_url", ""),
+                "coder_api_key": config.get("coder_api_key", ""),
+                "coder_organization": config.get("coder_organization", ""),
+                "coder_workspace": config.get("coder_workspace", ""),
+                "coder_template": config.get("coder_template", ""),
             }
 
         ssh_config = None
