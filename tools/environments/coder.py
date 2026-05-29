@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_PREFIX = "hermes-"
 _WORKSPACE_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,31})$")
+_MAX_WORKSPACE_NAME_LEN = 32
 
 
 def _coder_headers(api_key: str) -> dict[str, str]:
@@ -38,7 +39,7 @@ def _coder_headers(api_key: str) -> dict[str, str]:
 
 
 
-def _resolve_lineage_root_session_id(session_id: str, db: SessionDB | None = None) -> str:
+def _resolve_lineage_root_session_id(session_id: str, db: SessionDB) -> str:
     """Resolve the lineage root for a Hermes session ID.
 
     If the session cannot be found, fall back to the provided ID unchanged.
@@ -46,13 +47,12 @@ def _resolve_lineage_root_session_id(session_id: str, db: SessionDB | None = Non
     if not session_id:
         raise ValueError("Coder workspace resolution requires a non-empty session/task id")
 
-    database = db or SessionDB()
     current = session_id
     visited: set[str] = set()
 
     while current and current not in visited:
         visited.add(current)
-        session = database.get_session(current)
+        session = db.get_session(current)
         if not session:
             break
         parent = session.get("parent_session_id")
@@ -64,15 +64,30 @@ def _resolve_lineage_root_session_id(session_id: str, db: SessionDB | None = Non
 
 
 
+def _sanitize_workspace_name_suffix(value: str, max_len: int) -> str:
+    sanitized = value.lower().replace("_", "-")
+    sanitized = re.sub(r"[^a-z0-9-]+", "-", sanitized)
+    sanitized = re.sub(r"-+", "-", sanitized).strip("-")
+    if not sanitized:
+        sanitized = "task"
+    if not sanitized[0].isalnum():
+        sanitized = f"t-{sanitized}"
+    if len(sanitized) > max_len:
+        sanitized = sanitized[:max_len].rstrip("-")
+    if not sanitized:
+        sanitized = "task"
+    return sanitized
+
+
+
 def coder_workspace_name_for_task(task_id: str, db: SessionDB | None = None) -> str:
     """Map a Hermes task/session to a deterministic Coder workspace name."""
-    root_session_id = _resolve_lineage_root_session_id(task_id, db=db)
-    workspace_name = f"{_WORKSPACE_NAME_PREFIX}{root_session_id.replace('_', '-')}"
+    database = db or SessionDB()
+    root_session_id = _resolve_lineage_root_session_id(task_id, db=database)
+    max_suffix_len = _MAX_WORKSPACE_NAME_LEN - len(_WORKSPACE_NAME_PREFIX)
+    workspace_name = f"{_WORKSPACE_NAME_PREFIX}{_sanitize_workspace_name_suffix(root_session_id, max_suffix_len)}"
     if not _WORKSPACE_NAME_PATTERN.fullmatch(workspace_name):
-        raise ValueError(
-            "Derived Coder workspace name %r is invalid; expected %r + a Hermes lineage root session id"
-            % (workspace_name, _WORKSPACE_NAME_PREFIX)
-        )
+        raise ValueError(f"Derived Coder workspace name is invalid after sanitization: {workspace_name!r}")
     return workspace_name
 
 
@@ -425,28 +440,13 @@ class CoderEnvironment(BaseEnvironment):
 
     @staticmethod
     def _agent_startup_ready(agent: dict) -> bool:
-        """Return True when an agent is ready for PTY execution.
-
-        Coder can expose a workspace agent before startup scripts finish. Polling
-        this state avoids racing websocket execution against in-progress startup
-        scripts.
-        """
-        startup_status = (
-            agent.get("startup_script_status")
-            or (agent.get("startup_script") or {}).get("status")
-            or ""
-        )
-        startup_status = str(startup_status).strip().lower()
-        if startup_status and startup_status not in {"passed", "succeeded", "success", "complete", "completed"}:
+        """Return True when an agent is ready for PTY execution."""
+        agent_status = str(agent.get("status") or "").strip().lower()
+        if agent_status != "connected":
             return False
 
-        lifecycle_state = (
-            agent.get("lifecycle_state")
-            or agent.get("status")
-            or ""
-        )
-        lifecycle_state = str(lifecycle_state).strip().lower()
-        if lifecycle_state in {"created", "starting", "connecting", "pending", "initializing"}:
+        lifecycle_state = str(agent.get("lifecycle_state") or "").strip().lower()
+        if lifecycle_state != "ready":
             return False
 
         return True
@@ -464,11 +464,11 @@ class CoderEnvironment(BaseEnvironment):
                     if self._agent_startup_ready(agent):
                         return agent
                     logger.debug(
-                        "[coder] agent not ready yet; waiting for startup completion: workspace=%s agent_id=%s startup_script_status=%s lifecycle_state=%s",
+                        "[coder] agent not ready yet; waiting for connected+ready: workspace=%s agent_id=%s status=%s lifecycle_state=%s",
                         self.workspace,
                         agent_id,
-                        agent.get("startup_script_status") or (agent.get("startup_script") or {}).get("status"),
-                        agent.get("lifecycle_state") or agent.get("status"),
+                        agent.get("status"),
+                        agent.get("lifecycle_state"),
                     )
 
             if time.time() >= deadline:
@@ -533,9 +533,8 @@ class CoderEnvironment(BaseEnvironment):
         )
         matches = list(pattern.finditer(output))
         if not matches:
-            warning = "[Coder PTY exit marker missing]"
-            separator = "\n" if output and not output.endswith("\n") else ""
-            return f"{output}{separator}{warning}", 1
+            logger.warning("[coder] PTY exit marker missing; treating command as failed")
+            return output, 1
 
         match = matches[-1]
         exit_code = int(match.group(1))

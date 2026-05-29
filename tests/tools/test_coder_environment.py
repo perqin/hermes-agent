@@ -187,13 +187,24 @@ def test_workspace_name_uses_lineage_root(tmp_path, monkeypatch):
     )
 
 
+def test_workspace_name_sanitizes_non_session_task_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db = SessionDB(db_path=tmp_path / "state.db")
+
+    workspace = coder_workspace_name_for_task("Task/ID:With Weird_Chars__AndVeryVeryLongSuffix1234567890", db=db)
+
+    assert workspace.startswith("hermes-")
+    assert len(workspace) <= 32
+    assert re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", workspace)
+
+
 def test_coder_environment_initializes_session_snapshot_without_recursive_execute(monkeypatch):
     workspace_payload = {
         "id": "workspace-123",
         "name": "shared-dev",
         "latest_build": {
             "transition": "start",
-            "resources": [{"agents": [{"id": "agent-123"}]}],
+            "resources": [{"agents": [{"id": "agent-123", "status": "connected", "lifecycle_state": "ready"}]}],
         },
     }
     requests_get = MagicMock(
@@ -260,7 +271,7 @@ def test_coder_environment_leaves_snapshot_unready_when_init_session_fails(monke
         "name": "shared-dev",
         "latest_build": {
             "transition": "start",
-            "resources": [{"agents": [{"id": "agent-123"}]}],
+            "resources": [{"agents": [{"id": "agent-123", "status": "connected", "lifecycle_state": "ready"}]}],
         },
     }
     monkeypatch.setattr(
@@ -333,7 +344,7 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
         "name": "hermes-20260521-173045-ab12cd",
         "latest_build": {
             "transition": "start",
-            "resources": [{"agents": [{"id": "agent-123"}]}],
+            "resources": [{"agents": [{"id": "agent-123", "status": "connected", "lifecycle_state": "ready"}]}],
         },
     }
     reconnect_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -492,7 +503,6 @@ def test_coder_environment_missing_exit_marker_returns_backend_error(monkeypatch
 
     assert result["returncode"] == 1
     assert "plain output without marker" in result["output"]
-    assert "[Coder PTY exit marker missing]" in result["output"]
 
 
 def test_coder_process_kill_sends_ctrl_c_to_active_pty(monkeypatch):
@@ -610,7 +620,7 @@ def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
         "name": "hermes-20260521-173045-ab12cd",
         "latest_build": {
             "transition": "start",
-            "resources": [{"agents": [{"id": "agent-123"}]}],
+            "resources": [{"agents": [{"id": "agent-123", "status": "connected", "lifecycle_state": "ready"}]}],
         },
     }
     requests_get = MagicMock(
@@ -649,7 +659,7 @@ def test_coder_environment_autostarts_existing_stopped_workspace(monkeypatch):
     )
 
 
-def test_resolve_agent_id_waits_for_startup_script_completion_before_returning(monkeypatch):
+def test_resolve_agent_id_waits_for_agent_connected_and_ready_before_returning(monkeypatch):
     base_workspace = {
         "id": "workspace-123",
         "name": "hermes-20260521-173045-ab12cd",
@@ -663,8 +673,8 @@ def test_resolve_agent_id_waits_for_startup_script_completion_before_returning(m
                     "agents": [
                         {
                             "id": "agent-123",
-                            "startup_script_status": "running",
-                            "lifecycle_state": "starting",
+                            "status": "starting",
+                            "lifecycle_state": "created",
                         }
                     ]
                 }
@@ -680,7 +690,7 @@ def test_resolve_agent_id_waits_for_startup_script_completion_before_returning(m
                     "agents": [
                         {
                             "id": "agent-123",
-                            "startup_script_status": "passed",
+                            "status": "connected",
                             "lifecycle_state": "ready",
                         }
                     ]
