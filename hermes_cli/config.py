@@ -673,6 +673,7 @@ DEFAULT_CONFIG = {
         "coder_organization": "",
         "coder_workspace": "",
         "coder_template": "",
+        "coder_forward_env": [],
         "cwd": ".",  # Use current directory
         "timeout": 180,
         # Environment variables to pass through to sandboxed execution

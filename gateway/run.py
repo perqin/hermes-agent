@@ -814,6 +814,7 @@ if _config_path.exists():
                 "coder_organization": "CODER_ORGANIZATION",
                 "coder_workspace": "CODER_WORKSPACE",
                 "coder_template": "CODER_TEMPLATE",
+                "coder_forward_env": "TERMINAL_CODER_FORWARD_ENV",
                 "cwd": "TERMINAL_CWD",
                 "timeout": "TERMINAL_TIMEOUT",
                 "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",

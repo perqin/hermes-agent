@@ -195,6 +195,7 @@ def test_get_or_create_env_passes_coder_container_config(monkeypatch):
         "coder_organization": "acme",
         "coder_workspace": "shared-dev",
         "coder_template": "devcontainer",
+        "coder_forward_env": ["GITHUB_TOKEN"],
     }
 
     create_env = MagicMock(return_value=object())
@@ -220,6 +221,7 @@ def test_get_or_create_env_passes_coder_container_config(monkeypatch):
     assert cc["coder_organization"] == "acme"
     assert cc["coder_workspace"] == "shared-dev"
     assert cc["coder_template"] == "devcontainer"
+    assert cc["coder_forward_env"] == ["GITHUB_TOKEN"]
 
 
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")

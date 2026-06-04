@@ -610,6 +610,7 @@ def _get_or_create_env(task_id: str):
                 "coder_organization": config.get("coder_organization", ""),
                 "coder_workspace": config.get("coder_workspace", ""),
                 "coder_template": config.get("coder_template", ""),
+                "coder_forward_env": config.get("coder_forward_env", []),
             }
 
         ssh_config = None

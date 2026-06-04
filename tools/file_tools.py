@@ -482,6 +482,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "coder_organization": config.get("coder_organization", ""),
                     "coder_workspace": config.get("coder_workspace", ""),
                     "coder_template": config.get("coder_template", ""),
+                    "coder_forward_env": config.get("coder_forward_env", []),
                 }
 
             ssh_config = None

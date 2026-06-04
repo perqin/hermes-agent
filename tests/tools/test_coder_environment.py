@@ -128,6 +128,7 @@ def test_create_environment_constructs_coder_backend(monkeypatch):
             "coder_organization": "acme",
             "coder_workspace": "shared-dev",
             "coder_template": "devcontainer",
+            "coder_forward_env": [],
         },
         task_id="task-coder",
     )
@@ -142,6 +143,7 @@ def test_create_environment_constructs_coder_backend(monkeypatch):
         workspace_name="shared-dev",
         cwd="/root",
         timeout=30,
+        forward_env=[],
     )
 
 
@@ -235,6 +237,7 @@ def test_coder_environment_initializes_session_snapshot_without_recursive_execut
         "tools.environments.coder.coder_workspace_name_for_task",
         lambda task_id, db=None: "shared-dev",
     )
+    monkeypatch.setenv("HERMES_CODER_SNAPSHOT_TEST", "forwarded-value")
 
     env = CoderEnvironment(
         base_url="https://coder.example",
@@ -243,6 +246,7 @@ def test_coder_environment_initializes_session_snapshot_without_recursive_execut
         api_key="secret-token",
         workspace_name="shared-dev",
         timeout=5,
+        forward_env=["HERMES_CODER_SNAPSHOT_TEST"],
     )
 
     assert env._snapshot_ready is True
@@ -252,6 +256,7 @@ def test_coder_environment_initializes_session_snapshot_without_recursive_execut
     init_command = init_query["command"][0]
     assert init_command.startswith("bash -c ")
     assert "bash -lc" in init_command
+    assert "export HERMES_CODER_SNAPSHOT_TEST=forwarded-value" in init_command
     assert "export -p" in init_command
     assert "declare -f" in init_command
 
@@ -749,6 +754,7 @@ def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch)
     monkeypatch.setenv("CODER_ORGANIZATION", "acme")
     monkeypatch.setenv("CODER_WORKSPACE", "shared-dev")
     monkeypatch.setenv("CODER_TEMPLATE", "devcontainer")
+    monkeypatch.setenv("TERMINAL_CODER_FORWARD_ENV", '["GITHUB_TOKEN"]')
 
     payload = json.loads(terminal_tool_module.terminal_tool(command="printf 'hi from coder'", task_id="coder-test"))
 
@@ -759,3 +765,4 @@ def test_terminal_tool_passes_coder_config_into_environment_factory(monkeypatch)
     assert create_env.call_args.kwargs["container_config"]["coder_organization"] == "acme"
     assert create_env.call_args.kwargs["container_config"]["coder_workspace"] == "shared-dev"
     assert create_env.call_args.kwargs["container_config"]["coder_template"] == "devcontainer"
+    assert create_env.call_args.kwargs["container_config"]["coder_forward_env"] == ["GITHUB_TOKEN"]

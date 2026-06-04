@@ -26,6 +26,7 @@ from websockets.sync.client import connect
 
 from hermes_state import SessionDB
 from tools.environments.base import BaseEnvironment, _ThreadedProcessHandle
+from tools.environments.forward_env import collect_forwarded_env_values, normalize_forward_env_names
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,7 @@ class CoderEnvironment(BaseEnvironment):
         workspace_name: str | None = None,
         cwd: str = "~",
         timeout: int = 60,
+        forward_env: list[str] | None = None,
         init_session: bool = True,
     ):
         super().__init__(cwd=cwd, timeout=timeout)
@@ -288,9 +290,10 @@ class CoderEnvironment(BaseEnvironment):
         self.workspace = workspace_name or coder_workspace_name_for_task(task_id)
         self.api_key = api_key
         self._workspace_id: str | None = None
+        self._forward_env = normalize_forward_env_names(forward_env, config_name="coder_forward_env")
 
         logger.debug(
-            "[coder] init environment: base_url=%s template_name=%s organization_name=%s task_id=%s workspace=%s cwd=%s timeout=%s init_session=%s",
+            "[coder] init environment: base_url=%s template_name=%s organization_name=%s task_id=%s workspace=%s cwd=%s timeout=%s init_session=%s coder_forward_env=%s",
             self.base_url,
             self.template_name,
             self.organization_name,
@@ -299,6 +302,7 @@ class CoderEnvironment(BaseEnvironment):
             self.cwd,
             self.timeout,
             init_session,
+            self._forward_env,
         )
 
         # Safe to call here: init_session() uses _run_bash() directly, which
@@ -555,6 +559,16 @@ class CoderEnvironment(BaseEnvironment):
         )
         return f"bash -c {shlex.quote(capture_script)}"
 
+    def _build_init_env_exports(self) -> str:
+        """Build shell exports that seed forwarded env vars into the snapshot."""
+        env = collect_forwarded_env_values(self._forward_env, config_name="coder_forward_env")
+        if not env:
+            return ""
+        return "\n".join(
+            f"export {key}={shlex.quote(value)}"
+            for key, value in sorted(env.items())
+        )
+
     def _pty_url(self, agent_id: str, *, command: str, reconnect_id: str) -> str:
         parsed = urllib.parse.urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -734,6 +748,11 @@ class CoderEnvironment(BaseEnvironment):
             stdin_data is not None,
             len(stdin_data) if stdin_data is not None else 0,
         )
+        if login:
+            exports = self._build_init_env_exports()
+            if exports:
+                cmd_string = f"{exports}\n{cmd_string}"
+
         cancel_state = {"lock": threading.Lock(), "websocket": None, "cancelled": False}
 
         def cancel_pty() -> None:

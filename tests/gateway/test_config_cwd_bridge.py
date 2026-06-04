@@ -35,6 +35,7 @@ def _simulate_config_bridge(cfg: dict, initial_env: dict | None = None):
             "coder_organization": "CODER_ORGANIZATION",
             "coder_workspace": "CODER_WORKSPACE",
             "coder_template": "CODER_TEMPLATE",
+            "coder_forward_env": "TERMINAL_CODER_FORWARD_ENV",
             "cwd": "TERMINAL_CWD",
             "timeout": "TERMINAL_TIMEOUT",
             "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
@@ -228,6 +229,7 @@ class TestNestedTerminalCwdPlaceholderSkip:
                 "coder_organization": "acme",
                 "coder_workspace": "shared-dev",
                 "coder_template": "devcontainer",
+                "coder_forward_env": ["GITHUB_TOKEN"],
             }
         }
         result = _simulate_config_bridge(cfg)
@@ -236,6 +238,7 @@ class TestNestedTerminalCwdPlaceholderSkip:
         assert result["CODER_ORGANIZATION"] == "acme"
         assert result["CODER_WORKSPACE"] == "shared-dev"
         assert result["CODER_TEMPLATE"] == "devcontainer"
+        assert result["TERMINAL_CODER_FORWARD_ENV"] == '["GITHUB_TOKEN"]'
 
 class TestTildeExpansion:
     """terminal.cwd values containing shell tilde must be expanded.
