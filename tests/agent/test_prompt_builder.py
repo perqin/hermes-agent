@@ -942,11 +942,26 @@ class TestEnvironmentHints:
     def test_remote_backend_list_covers_known_sandboxes(self):
         """Regression guard: if someone adds a remote backend, they must list it here."""
         import agent.prompt_builder as _pb
-        for backend in ("docker", "singularity", "modal", "daytona", "ssh"):
+        for backend in ("docker", "singularity", "modal", "daytona", "ssh", "coder"):
             assert backend in _pb._REMOTE_TERMINAL_BACKENDS, (
                 f"{backend!r} must be in _REMOTE_TERMINAL_BACKENDS so its host "
                 f"info is suppressed in the system prompt"
             )
+
+    def test_build_environment_hints_suppresses_host_on_coder_backend(self, monkeypatch):
+        """Coder workspaces are remote backends; host cwd/OS would mislead the agent."""
+        import agent.prompt_builder as _pb
+        import sys
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setenv("TERMINAL_ENV", "coder")
+        monkeypatch.setattr(_pb, "_probe_remote_backend", lambda _t: None)
+        _pb._clear_backend_probe_cache()
+        result = _pb.build_environment_hints()
+        assert "Host: macOS" not in result
+        assert "Current working directory:" not in result
+        assert "Terminal backend: coder" in result
+        assert "Coder workspace" in result
 
 
 # =========================================================================
@@ -1192,6 +1207,5 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 
 
