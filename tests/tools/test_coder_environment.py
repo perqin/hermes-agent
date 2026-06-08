@@ -26,7 +26,10 @@ class _FakeWebSocket:
         self.requested.append({"timeout": timeout, "decode": decode})
         if not self._messages:
             raise EOFError
-        return self._messages.pop(0)
+        message = self._messages.pop(0)
+        if isinstance(message, BaseException):
+            raise message
+        return message
 
 
 class _FakeResponse:
@@ -412,6 +415,116 @@ def test_coder_environment_execute_creates_workspace_then_reads_pty_until_eof(mo
     assert "bash -lc" in pty_command
     assert "echo hello-from-hermes" in pty_command
     assert pty_command != "pwd"
+
+
+def test_coder_environment_reconnects_same_pty_after_empty_initial_eof(monkeypatch):
+    reconnect_id = uuid.UUID("22222222-3333-4444-5555-666666666666")
+    exit_marker = f"__HERMES_EXIT_{reconnect_id}__"
+    first_ws = _FakeWebSocket([])
+    second_ws = _FakeWebSocket([f"hello after reconnect\n\n{exit_marker}0{exit_marker}\n".encode()])
+    connect_mock = MagicMock(side_effect=[first_ws, second_ws])
+
+    monkeypatch.setattr("tools.environments.coder.connect", connect_mock)
+    monkeypatch.setattr("tools.environments.coder.uuid.uuid4", lambda: reconnect_id)
+    monkeypatch.setattr("tools.environments.coder.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(CoderEnvironment, "_resolve_agent_id", lambda self: "agent-123")
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+        init_session=False,
+    )
+
+    result = env.execute("echo hello")
+
+    assert result["returncode"] == 0
+    assert result["output"] == "hello after reconnect\n"
+    assert connect_mock.call_count == 2
+    first_query = parse_qs(urlparse(connect_mock.call_args_list[0].args[0]).query)
+    second_query = parse_qs(urlparse(connect_mock.call_args_list[1].args[0]).query)
+    assert first_query["reconnect"] == [str(reconnect_id)]
+    assert second_query["reconnect"] == [str(reconnect_id)]
+    assert second_query["command"] == first_query["command"]
+
+
+def test_coder_environment_does_not_reconnect_empty_eof_with_stdin(monkeypatch):
+    class _SendingWebSocket(_FakeWebSocket):
+        def __init__(self, messages):
+            super().__init__(messages)
+            self.sent = []
+
+        def send(self, message):
+            self.sent.append(message)
+
+    fake_ws = _SendingWebSocket([])
+    connect_mock = MagicMock(return_value=fake_ws)
+
+    monkeypatch.setattr("tools.environments.coder.connect", connect_mock)
+    monkeypatch.setattr(CoderEnvironment, "_resolve_agent_id", lambda self: "agent-123")
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+        init_session=False,
+    )
+
+    result = env.execute("cat > /tmp/out.txt", stdin_data="hello stdin")
+
+    assert result["returncode"] == 1
+    assert connect_mock.call_count == 1
+    sent_payloads = [json.loads(frame.decode("utf-8")) for frame in fake_ws.sent]
+    assert sent_payloads == [{"data": "hello stdin"}, {"data": "\u0004"}]
+
+
+def test_coder_environment_recv_timeout_poll_does_not_fail_silent_command(monkeypatch):
+    reconnect_id = uuid.UUID("33333333-4444-5555-6666-777777777777")
+    exit_marker = f"__HERMES_EXIT_{reconnect_id}__"
+    fake_ws = _FakeWebSocket(
+        [
+            TimeoutError(),
+            f"eventual output\n\n{exit_marker}0{exit_marker}\n".encode(),
+        ]
+    )
+    connect_mock = MagicMock(return_value=fake_ws)
+
+    monkeypatch.setattr("tools.environments.coder.connect", connect_mock)
+    monkeypatch.setattr("tools.environments.coder.uuid.uuid4", lambda: reconnect_id)
+    monkeypatch.setattr(CoderEnvironment, "_resolve_agent_id", lambda self: "agent-123")
+    monkeypatch.setattr(
+        "tools.environments.coder.coder_workspace_name_for_task",
+        lambda task_id, db=None: "hermes-20260521-173045-ab12cd",
+    )
+
+    env = CoderEnvironment(
+        base_url="https://coder.example",
+        template_name="devcontainer",
+        task_id="20260521_180000_ef3456",
+        api_key="secret-token",
+        timeout=5,
+        init_session=False,
+    )
+
+    result = env.execute("sleep 2 && echo done", timeout=9)
+
+    assert result["returncode"] == 0
+    assert result["output"] == "eventual output\n"
+    assert connect_mock.call_args.kwargs["open_timeout"] == 9
+    assert fake_ws.requested[0]["timeout"] == 1.0
+    assert fake_ws.requested[0]["decode"] is False
 
 
 def test_coder_environment_stdin_data_uses_binary_json_frames_and_eof(monkeypatch):

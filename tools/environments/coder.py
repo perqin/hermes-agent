@@ -267,6 +267,10 @@ class CoderEnvironment(BaseEnvironment):
 
     _stdin_mode = "passthrough"
     _STDIN_CHUNK_SIZE = 32 * 1024
+    _PTY_RECV_POLL_TIMEOUT = 1.0
+    _PTY_EMPTY_EOF_RECONNECTS = 2
+    _PTY_EMPTY_EOF_RECONNECT_WINDOW = 1.0
+    _PTY_EMPTY_EOF_RECONNECT_DELAY = 0.2
 
     def __init__(
         self,
@@ -531,16 +535,25 @@ class CoderEnvironment(BaseEnvironment):
         return f"__HERMES_EXIT_{reconnect_id}__"
 
     @staticmethod
-    def _extract_exit_code(output: str, exit_marker: str) -> tuple[str, int]:
+    def _exit_marker_match(output: str, exit_marker: str) -> re.Match[str] | None:
         pattern = re.compile(
             rf"(?:\r?\n)?{re.escape(exit_marker)}(\d{{1,3}}){re.escape(exit_marker)}\r?\n?"
         )
         matches = list(pattern.finditer(output))
-        if not matches:
-            logger.warning("[coder] PTY exit marker missing; treating command as failed")
+        return matches[-1] if matches else None
+
+    @classmethod
+    def _has_exit_marker(cls, output: str, exit_marker: str) -> bool:
+        return cls._exit_marker_match(output, exit_marker) is not None
+
+    @classmethod
+    def _extract_exit_code(cls, output: str, exit_marker: str) -> tuple[str, int]:
+        match = cls._exit_marker_match(output, exit_marker)
+        if match is None:
+            logger.error("[coder] PTY exit marker missing; treating command as failed")
+            logger.info("[coder] PTY no-marker output: %r", output)
             return output, 1
 
-        match = matches[-1]
         exit_code = int(match.group(1))
         if not 0 <= exit_code <= 255:
             exit_code = 1
@@ -643,11 +656,19 @@ class CoderEnvironment(BaseEnvironment):
         except Exception:
             pass
 
+    @staticmethod
+    def _cancel_requested(cancel_state: dict | None) -> bool:
+        if cancel_state is None:
+            return False
+        with cancel_state["lock"]:
+            return bool(cancel_state.get("cancelled"))
+
     def _execute_via_pty(
         self,
         cmd_string: str,
         *,
         login: bool,
+        timeout: int,
         stdin_data: str | None = None,
         cancel_state: dict | None = None,
     ) -> tuple[str, int]:
@@ -663,6 +684,7 @@ class CoderEnvironment(BaseEnvironment):
         reconnect_id = str(uuid.uuid4())
         exit_marker = self._exit_marker(reconnect_id)
         pty_command = self._pty_command(cmd_string, login=login, exit_marker=exit_marker)
+        logger.info("[coder] pty_command=%s", pty_command)
         pty_url = self._pty_url(agent_id, command=pty_command, reconnect_id=reconnect_id)
         logger.debug(
             "[coder] websocket connect begin: workspace=%s agent_id=%s reconnect_id=%s pty_url=%s pty_command=%r",
@@ -673,54 +695,99 @@ class CoderEnvironment(BaseEnvironment):
             pty_command,
         )
         output_parts: list[str] = []
+        recv_poll_timeout = max(0.1, min(self._PTY_RECV_POLL_TIMEOUT, float(timeout)))
+        max_empty_reconnects = self._PTY_EMPTY_EOF_RECONNECTS if stdin_data is None else 0
+        empty_reconnects = 0
 
-        with connect(
-            pty_url,
-            additional_headers=self._headers(),
-            open_timeout=self.timeout,
-            close_timeout=1,
-        ) as websocket:
-            logger.debug("[coder] websocket connected: workspace=%s reconnect_id=%s", self.workspace, reconnect_id)
-            should_interrupt = False
-            if cancel_state is not None:
-                lock = cancel_state["lock"]
-                with lock:
-                    cancel_state["websocket"] = websocket
-                    should_interrupt = bool(cancel_state.get("cancelled"))
-            if should_interrupt:
-                self._interrupt_pty(websocket)
+        while True:
+            attempt_started = time.monotonic()
+            attempt_start_chars = sum(len(part) for part in output_parts)
 
-            if stdin_data is not None:
-                self._send_stdin_data(websocket, stdin_data)
-                self._send_stdin_eof(websocket)
-
-            try:
-                while True:
-                    try:
-                        message = websocket.recv(timeout=self.timeout, decode=False)
-                    except EOFError:
-                        logger.debug("[coder] websocket recv EOFError: workspace=%s reconnect_id=%s", self.workspace, reconnect_id)
-                        break
-                    except ConnectionClosed:
-                        logger.debug("[coder] websocket recv ConnectionClosed: workspace=%s reconnect_id=%s", self.workspace, reconnect_id)
-                        break
-
-                    if isinstance(message, bytes):
-                        decoded = message.decode("utf-8", errors="replace")
-                        logger.debug("[coder] websocket recv bytes: bytes=%s decoded=%r", len(message), decoded)
-                        output_parts.append(decoded)
-                    else:
-                        logger.debug("[coder] websocket recv text: chars=%s payload=%r", len(message), message)
-                        output_parts.append(message)
-            finally:
+            with connect(
+                pty_url,
+                additional_headers=self._headers(),
+                open_timeout=timeout,
+                close_timeout=1,
+            ) as websocket:
+                logger.debug(
+                    "[coder] websocket connected: workspace=%s reconnect_id=%s",
+                    self.workspace,
+                    reconnect_id,
+                )
                 if cancel_state is not None:
                     with cancel_state["lock"]:
-                        if cancel_state.get("websocket") is websocket:
-                            cancel_state["websocket"] = None
+                        cancel_state["websocket"] = websocket
+                if self._cancel_requested(cancel_state):
+                    self._interrupt_pty(websocket)
+
+                if stdin_data is not None:
+                    self._send_stdin_data(websocket, stdin_data)
+                    self._send_stdin_eof(websocket)
+
+                try:
+                    while True:
+                        try:
+                            message = websocket.recv(timeout=recv_poll_timeout, decode=False)
+                        except TimeoutError:
+                            continue
+                        except EOFError:
+                            logger.debug(
+                                "[coder] websocket recv EOFError: workspace=%s reconnect_id=%s",
+                                self.workspace,
+                                reconnect_id,
+                            )
+                            break
+                        except ConnectionClosed as exc:
+                            logger.debug(
+                                "[coder] websocket recv ConnectionClosed: workspace=%s reconnect_id=%s rcvd=%s sent=%s",
+                                self.workspace,
+                                reconnect_id,
+                                getattr(exc, "rcvd", None),
+                                getattr(exc, "sent", None),
+                            )
+                            break
+
+                        if isinstance(message, bytes):
+                            decoded = message.decode("utf-8", errors="replace")
+                            logger.debug("[coder] websocket recv bytes: bytes=%s decoded=%r", len(message), decoded)
+                            output_parts.append(decoded)
+                        else:
+                            logger.debug("[coder] websocket recv text: chars=%s payload=%r", len(message), message)
+                            output_parts.append(message)
+                finally:
+                    if cancel_state is not None:
+                        with cancel_state["lock"]:
+                            if cancel_state.get("websocket") is websocket:
+                                cancel_state["websocket"] = None
+
+            combined_output = "".join(output_parts)
+            if self._has_exit_marker(combined_output, exit_marker) or self._cancel_requested(cancel_state):
+                break
+
+            attempt_output_chars = len(combined_output) - attempt_start_chars
+            attempt_elapsed = time.monotonic() - attempt_started
+            if (
+                attempt_output_chars == 0
+                and attempt_elapsed <= self._PTY_EMPTY_EOF_RECONNECT_WINDOW
+                and empty_reconnects < max_empty_reconnects
+            ):
+                empty_reconnects += 1
+                logger.warning(
+                    "[coder] PTY closed before output/marker; reconnecting same session: "
+                    "workspace=%s reconnect_id=%s reconnect_attempt=%s elapsed_ms=%.1f",
+                    self.workspace,
+                    reconnect_id,
+                    empty_reconnects,
+                    attempt_elapsed * 1000,
+                )
+                time.sleep(self._PTY_EMPTY_EOF_RECONNECT_DELAY * empty_reconnects)
+                continue
+
+            break
 
         combined_output = "".join(output_parts)
         cleaned_output, exit_code = self._extract_exit_code(combined_output, exit_marker)
-        logger.debug(
+        logger.info(
             "[coder] execute_via_pty output: workspace=%s reconnect_id=%s raw_output_chars=%s cleaned_output_chars=%s exit_code=%s cleaned_output=%r",
             self.workspace,
             reconnect_id,
@@ -739,8 +806,7 @@ class CoderEnvironment(BaseEnvironment):
         timeout: int = 120,
         stdin_data: str | None = None,
     ):
-        del timeout
-        logger.debug(
+        logger.info(
             "[coder] run_bash input: workspace=%s cmd_string=%r login=%s stdin_present=%s stdin_chars=%s",
             self.workspace,
             cmd_string,
@@ -767,6 +833,7 @@ class CoderEnvironment(BaseEnvironment):
             lambda: self._execute_via_pty(
                 cmd_string,
                 login=login,
+                timeout=timeout,
                 stdin_data=stdin_data,
                 cancel_state=cancel_state,
             ),
