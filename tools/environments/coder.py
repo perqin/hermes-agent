@@ -787,6 +787,8 @@ class CoderEnvironment(BaseEnvironment):
 
         combined_output = "".join(output_parts)
         cleaned_output, exit_code = self._extract_exit_code(combined_output, exit_marker)
+        # Workaround: \r\n -> \n for pty
+        cleaned_output = cleaned_output.replace("\r\n", "\n")
         logger.info(
             "[coder] execute_via_pty output: workspace=%s reconnect_id=%s raw_output_chars=%s cleaned_output_chars=%s exit_code=%s cleaned_output=%r",
             self.workspace,
