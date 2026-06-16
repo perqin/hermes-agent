@@ -1136,6 +1136,11 @@ if _config_path.exists():
         if _terminal_cfg and isinstance(_terminal_cfg, dict):
             _terminal_env_map = {
                 "backend": "TERMINAL_ENV",
+                "coder_url": "CODER_URL",
+                "coder_organization": "CODER_ORGANIZATION",
+                "coder_workspace": "CODER_WORKSPACE",
+                "coder_template": "CODER_TEMPLATE",
+                "coder_forward_env": "TERMINAL_CODER_FORWARD_ENV",
                 "cwd": "TERMINAL_CWD",
                 "timeout": "TERMINAL_TIMEOUT",
                 "home_mode": "TERMINAL_HOME_MODE",
