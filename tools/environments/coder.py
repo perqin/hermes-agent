@@ -124,12 +124,6 @@ def _create_workspace_url(base_url: str, organization_id: str, user: str = "me")
 
 
 def _find_workspace_by_name(*, base_url: str, workspace_name: str, api_key: str, timeout: int = 10) -> dict | None:
-    logger.debug(
-        "[coder] workspace search request: base_url=%s workspace_name=%s timeout=%s",
-        base_url,
-        workspace_name,
-        timeout,
-    )
     response = requests.get(
         _workspace_search_url(base_url),
         headers=_coder_headers(api_key),
@@ -145,14 +139,7 @@ def _find_workspace_by_name(*, base_url: str, workspace_name: str, api_key: str,
         if isinstance(workspace, dict) and workspace.get("name") == workspace_name:
             owner = workspace.get("owner_name") or workspace.get("owner", {}).get("username")
             if owner in (None, "", "me") or owner == workspace.get("owner_name"):
-                logger.debug(
-                    "[coder] workspace search hit: workspace_name=%s workspace_id=%s owner=%s",
-                    workspace_name,
-                    workspace.get("id"),
-                    owner,
-                )
                 return workspace
-    logger.debug("[coder] workspace search miss: workspace_name=%s", workspace_name)
     return None
 
 
@@ -212,14 +199,6 @@ def _create_workspace(
     organization_name: str | None = None,
     timeout: int = 10,
 ) -> dict:
-    logger.debug(
-        "[coder] workspace create request: base_url=%s workspace_name=%s template_name=%s organization_name=%s timeout=%s",
-        base_url,
-        workspace_name,
-        template_name,
-        organization_name,
-        timeout,
-    )
     organization_id = _get_organization_id(
         base_url=base_url,
         api_key=api_key,
@@ -243,11 +222,6 @@ def _create_workspace(
     payload = response.json()
     if not isinstance(payload, dict):
         raise RuntimeError(f"Unexpected create-workspace payload for Coder workspace {workspace_name!r}")
-    logger.debug(
-        "[coder] workspace created: workspace_name=%s workspace_id=%s",
-        workspace_name,
-        payload.get("id"),
-    )
     return payload
 
 
@@ -296,19 +270,6 @@ class CoderEnvironment(BaseEnvironment):
         self._workspace_id: str | None = None
         self._forward_env = normalize_forward_env_names(forward_env, config_name="coder_forward_env")
 
-        logger.debug(
-            "[coder] init environment: base_url=%s template_name=%s organization_name=%s task_id=%s workspace=%s cwd=%s timeout=%s init_session=%s coder_forward_env=%s",
-            self.base_url,
-            self.template_name,
-            self.organization_name,
-            self.task_id,
-            self.workspace,
-            self.cwd,
-            self.timeout,
-            init_session,
-            self._forward_env,
-        )
-
         # Safe to call here: init_session() uses _run_bash() directly, which
         # resolves the workspace/agent and opens a PTY without going back
         # through BaseEnvironment.execute(), so there is no recursive wrapping
@@ -332,11 +293,6 @@ class CoderEnvironment(BaseEnvironment):
         return f"{self.base_url}/api/v2/workspaces/{urllib.parse.quote(workspace_id, safe='')}/builds"
 
     def _ensure_workspace(self) -> dict:
-        logger.debug(
-            "[coder] ensure workspace start: workspace=%s current_workspace_id=%s",
-            self.workspace,
-            self._workspace_id,
-        )
         payload = _find_workspace_by_name(
             base_url=self.base_url,
             workspace_name=self.workspace,
@@ -344,7 +300,6 @@ class CoderEnvironment(BaseEnvironment):
             timeout=self.timeout,
         )
         if payload is None:
-            logger.debug("[coder] workspace missing; creating: workspace=%s", self.workspace)
             payload = _create_workspace(
                 base_url=self.base_url,
                 workspace_name=self.workspace,
@@ -357,20 +312,10 @@ class CoderEnvironment(BaseEnvironment):
         if not workspace_id:
             raise RuntimeError(f"Coder workspace {self.workspace!r} did not include a workspace id")
         self._workspace_id = workspace_id
-        logger.debug(
-            "[coder] ensure workspace done: workspace=%s workspace_id=%s",
-            self.workspace,
-            self._workspace_id,
-        )
         return payload
 
     def _get_workspace_payload(self) -> dict:
         self._ensure_workspace()
-        logger.debug(
-            "[coder] fetching workspace payload: workspace=%s workspace_id=%s",
-            self.workspace,
-            self._workspace_id,
-        )
         response = requests.get(
             self._workspace_url(),
             headers=self._headers(),
@@ -380,19 +325,9 @@ class CoderEnvironment(BaseEnvironment):
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError(f"Unexpected workspace payload for Coder workspace {self.workspace!r}")
-        latest_build = payload.get("latest_build") or {}
-        logger.debug(
-            "[coder] fetched workspace payload: workspace=%s workspace_id=%s latest_build_id=%s transition=%s status=%s",
-            self.workspace,
-            payload.get("id"),
-            latest_build.get("id"),
-            latest_build.get("transition"),
-            latest_build.get("status"),
-        )
         return payload
 
     def _start_workspace(self, workspace_id: str) -> str:
-        logger.debug("[coder] starting workspace: workspace=%s workspace_id=%s", self.workspace, workspace_id)
         response = requests.post(
             self._workspace_builds_url(workspace_id),
             headers=self._headers(),
@@ -404,21 +339,9 @@ class CoderEnvironment(BaseEnvironment):
         build_id = payload.get("id")
         if not build_id:
             raise RuntimeError(f"Coder start build for workspace {self.workspace!r} did not return a build id")
-        logger.debug(
-            "[coder] workspace start requested: workspace=%s workspace_id=%s build_id=%s",
-            self.workspace,
-            workspace_id,
-            build_id,
-        )
         return build_id
 
     def _wait_for_build_completion(self, build_id: str) -> None:
-        logger.debug(
-            "[coder] waiting for build completion: workspace=%s build_id=%s timeout=%s",
-            self.workspace,
-            build_id,
-            max(self.timeout, 300),
-        )
         deadline = time.time() + max(self.timeout, 300)
         while time.time() < deadline:
             response = requests.get(
@@ -430,13 +353,6 @@ class CoderEnvironment(BaseEnvironment):
             payload = response.json()
             job = payload.get("job") or {}
             status = (job.get("status") or "").lower()
-            logger.debug(
-                "[coder] build poll: workspace=%s build_id=%s status=%s completed_at=%s",
-                self.workspace,
-                build_id,
-                status,
-                job.get("completed_at"),
-            )
             if job.get("completed_at"):
                 if status != "succeeded":
                     raise RuntimeError(
@@ -471,13 +387,6 @@ class CoderEnvironment(BaseEnvironment):
                         continue
                     if self._agent_startup_ready(agent):
                         return agent
-                    logger.debug(
-                        "[coder] agent not ready yet; waiting for connected+ready: workspace=%s agent_id=%s status=%s lifecycle_state=%s",
-                        self.workspace,
-                        agent_id,
-                        agent.get("status"),
-                        agent.get("lifecycle_state"),
-                    )
 
             if time.time() >= deadline:
                 raise TimeoutError(
@@ -488,17 +397,9 @@ class CoderEnvironment(BaseEnvironment):
             payload = self._get_workspace_payload()
 
     def _resolve_agent_id(self) -> str:
-        logger.debug("[coder] resolving workspace agent id: workspace=%s", self.workspace)
         payload = self._get_workspace_payload()
         latest_build = payload.get("latest_build") or {}
         transition = (latest_build.get("transition") or "").lower()
-        logger.debug(
-            "[coder] resolve agent checkpoint: workspace=%s transition=%s build_id=%s status=%s",
-            self.workspace,
-            transition,
-            latest_build.get("id"),
-            latest_build.get("status"),
-        )
 
         if transition != "start":
             if transition == "delete":
@@ -522,11 +423,6 @@ class CoderEnvironment(BaseEnvironment):
         agent = self._wait_for_agent_ready(payload)
         agent_id = agent.get("id")
         if agent_id:
-            logger.debug(
-                "[coder] resolved workspace agent id: workspace=%s agent_id=%s",
-                self.workspace,
-                agent_id,
-            )
             return agent_id
         raise RuntimeError(f"No workspace agent found for Coder workspace {self.workspace!r}")
 
@@ -551,7 +447,6 @@ class CoderEnvironment(BaseEnvironment):
         match = cls._exit_marker_match(output, exit_marker)
         if match is None:
             logger.error("[coder] PTY exit marker missing; treating command as failed")
-            logger.info("[coder] PTY no-marker output: %r", output)
             return output, 1
 
         exit_code = int(match.group(1))
@@ -613,28 +508,15 @@ class CoderEnvironment(BaseEnvironment):
         if not stdin_data:
             return
         chunk_size = max(1, cls._STDIN_CHUNK_SIZE)
-        logger.debug(
-            "[coder] websocket stdin send begin: total_chars=%s chunk_size=%s",
-            len(stdin_data),
-            chunk_size,
-        )
         for start in range(0, len(stdin_data), chunk_size):
             chunk = stdin_data[start : start + chunk_size]
             frame = cls._stdin_frame(chunk)
-            logger.debug(
-                "[coder] websocket send stdin frame: chunk_index=%s chunk_chars=%s frame_bytes=%s payload=%r",
-                start // chunk_size,
-                len(chunk),
-                len(frame),
-                chunk,
-            )
             websocket.send(frame)
 
     @classmethod
     def _send_stdin_eof(cls, websocket) -> None:
         # EOT / Ctrl+D signals EOF for stdin-driven commands.
         frame = cls._stdin_frame("\u0004")
-        logger.debug("[coder] websocket send stdin EOF frame: frame_bytes=%s payload=%r", len(frame), "\\u0004")
         websocket.send(frame)
 
     @classmethod
@@ -646,12 +528,10 @@ class CoderEnvironment(BaseEnvironment):
         """
         try:
             frame = cls._stdin_frame("\u0003")
-            logger.debug("[coder] websocket send interrupt frame: frame_bytes=%s payload=%r", len(frame), "\\u0003")
             websocket.send(frame)
         except Exception:
             pass
         try:
-            logger.debug("[coder] websocket closing after interrupt")
             websocket.close()
         except Exception:
             pass
@@ -672,28 +552,11 @@ class CoderEnvironment(BaseEnvironment):
         stdin_data: str | None = None,
         cancel_state: dict | None = None,
     ) -> tuple[str, int]:
-        logger.debug(
-            "[coder] execute_via_pty input: workspace=%s cmd_string=%r login=%s stdin_present=%s stdin_chars=%s",
-            self.workspace,
-            cmd_string,
-            login,
-            stdin_data is not None,
-            len(stdin_data) if stdin_data is not None else 0,
-        )
         agent_id = self._resolve_agent_id()
         reconnect_id = str(uuid.uuid4())
         exit_marker = self._exit_marker(reconnect_id)
         pty_command = self._pty_command(cmd_string, login=login, exit_marker=exit_marker)
-        logger.info("[coder] pty_command=%s", pty_command)
         pty_url = self._pty_url(agent_id, command=pty_command, reconnect_id=reconnect_id)
-        logger.debug(
-            "[coder] websocket connect begin: workspace=%s agent_id=%s reconnect_id=%s pty_url=%s pty_command=%r",
-            self.workspace,
-            agent_id,
-            reconnect_id,
-            pty_url,
-            pty_command,
-        )
         output_parts: list[str] = []
         recv_poll_timeout = max(0.1, min(self._PTY_RECV_POLL_TIMEOUT, float(timeout)))
         max_empty_reconnects = self._PTY_EMPTY_EOF_RECONNECTS if stdin_data is None else 0
@@ -709,11 +572,6 @@ class CoderEnvironment(BaseEnvironment):
                 open_timeout=timeout,
                 close_timeout=1,
             ) as websocket:
-                logger.debug(
-                    "[coder] websocket connected: workspace=%s reconnect_id=%s",
-                    self.workspace,
-                    reconnect_id,
-                )
                 if cancel_state is not None:
                     with cancel_state["lock"]:
                         cancel_state["websocket"] = websocket
@@ -731,28 +589,14 @@ class CoderEnvironment(BaseEnvironment):
                         except TimeoutError:
                             continue
                         except EOFError:
-                            logger.debug(
-                                "[coder] websocket recv EOFError: workspace=%s reconnect_id=%s",
-                                self.workspace,
-                                reconnect_id,
-                            )
                             break
-                        except ConnectionClosed as exc:
-                            logger.debug(
-                                "[coder] websocket recv ConnectionClosed: workspace=%s reconnect_id=%s rcvd=%s sent=%s",
-                                self.workspace,
-                                reconnect_id,
-                                getattr(exc, "rcvd", None),
-                                getattr(exc, "sent", None),
-                            )
+                        except ConnectionClosed:
                             break
 
                         if isinstance(message, bytes):
                             decoded = message.decode("utf-8", errors="replace")
-                            logger.debug("[coder] websocket recv bytes: bytes=%s decoded=%r", len(message), decoded)
                             output_parts.append(decoded)
                         else:
-                            logger.debug("[coder] websocket recv text: chars=%s payload=%r", len(message), message)
                             output_parts.append(message)
                 finally:
                     if cancel_state is not None:
@@ -789,15 +633,6 @@ class CoderEnvironment(BaseEnvironment):
         cleaned_output, exit_code = self._extract_exit_code(combined_output, exit_marker)
         # Workaround: \r\n -> \n for pty
         cleaned_output = cleaned_output.replace("\r\n", "\n")
-        logger.info(
-            "[coder] execute_via_pty output: workspace=%s reconnect_id=%s raw_output_chars=%s cleaned_output_chars=%s exit_code=%s cleaned_output=%r",
-            self.workspace,
-            reconnect_id,
-            len(combined_output),
-            len(cleaned_output),
-            exit_code,
-            cleaned_output,
-        )
         return cleaned_output, exit_code
 
     def _run_bash(
@@ -808,14 +643,6 @@ class CoderEnvironment(BaseEnvironment):
         timeout: int = 120,
         stdin_data: str | None = None,
     ):
-        logger.info(
-            "[coder] run_bash input: workspace=%s cmd_string=%r login=%s stdin_present=%s stdin_chars=%s",
-            self.workspace,
-            cmd_string,
-            login,
-            stdin_data is not None,
-            len(stdin_data) if stdin_data is not None else 0,
-        )
         if login:
             exports = self._build_init_env_exports()
             if exports:
