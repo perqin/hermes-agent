@@ -79,8 +79,8 @@ def collect_forwarded_env_values(
     resolved: dict[str, str] = {}
     for key in sorted(forward_keys):
         value = os.getenv(key)
-        if value is None:
+        if not value:
             value = hermes_env.get(key)
-        if value is not None:
+        if value:
             resolved[key] = value
     return resolved
