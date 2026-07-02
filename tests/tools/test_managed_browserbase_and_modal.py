@@ -181,8 +181,15 @@ def _install_fake_tools_package():
         def cleanup(self):
             return None
 
-    sys.modules["tools.environments.base"] = types.SimpleNamespace(BaseEnvironment=_DummyEnvironment)
-    sys.modules["tools.environments.local"] = types.SimpleNamespace(LocalEnvironment=_DummyEnvironment)
+    sys.modules["tools.environments.base"] = types.SimpleNamespace(
+        BaseEnvironment=_DummyEnvironment,
+        _ThreadedProcessHandle=object,
+    )
+    sys.modules["tools.environments.local"] = types.SimpleNamespace(
+        LocalEnvironment=_DummyEnvironment,
+        _HERMES_PROVIDER_ENV_BLOCKLIST=frozenset(),
+        _is_hermes_internal_secret=lambda _name: False,
+    )
     sys.modules["tools.environments.singularity"] = types.SimpleNamespace(
         _get_scratch_dir=lambda: Path(tempfile.gettempdir()),
         SingularityEnvironment=_DummyEnvironment,
