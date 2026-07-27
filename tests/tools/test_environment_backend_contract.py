@@ -15,13 +15,11 @@ def test_backend_definition_is_public_and_mutable():
         BackendDefinition,
         ExecutionLocation,
         FilesystemSemantics,
-        HostAccess,
     )
 
     capabilities = BackendCapabilities(
         execution_location=ExecutionLocation.REMOTE,
         filesystem_semantics=FilesystemSemantics.ISOLATED,
-        host_access=HostAccess.POSSIBLE,
         accepts_host_cwd=False,
         supports_image=True,
         supports_resource_limits=True,
@@ -44,6 +42,82 @@ def test_backend_definition_is_public_and_mutable():
 
     assert definition.name == "other"
     assert definition.capabilities.supports_pty is False
+
+
+def test_backend_capabilities_separate_declaration_effective_and_runtime_state():
+    from dataclasses import fields
+
+    from tools.environments import BackendCapabilities
+    from tools.environments.definitions import (
+        EffectiveBackendCapabilities,
+        EnvironmentRuntimeState,
+        FilesystemSemantics,
+        HostAccess,
+    )
+
+    assert "host_access" not in {field.name for field in fields(BackendCapabilities)}
+
+    declared = BackendCapabilities(supports_pty=True)
+    effective = EffectiveBackendCapabilities(
+        supports_pty=declared.supports_pty,
+        filesystem_semantics=FilesystemSemantics.ISOLATED,
+        host_access=HostAccess.POSSIBLE,
+    )
+    runtime = EnvironmentRuntimeState(
+        backend_name="docker",
+        task_id="task-1",
+        filesystem_semantics=FilesystemSemantics.ISOLATED,
+        host_access=HostAccess.NONE,
+        isolation_verified_by_host=True,
+    )
+
+    unverified_runtime = EnvironmentRuntimeState(
+        backend_name="plugin-backend",
+        task_id="task-2",
+        host_access=HostAccess.NONE,
+    )
+
+    assert effective.host_access is HostAccess.POSSIBLE
+    assert runtime.host_access is HostAccess.NONE
+    assert runtime.has_verified_no_host_access is True
+    assert unverified_runtime.has_verified_no_host_access is False
+
+
+def test_host_owned_capability_state_is_not_reexported_to_plugins():
+    import tools.environments as public_contract
+
+    host_owned_names = {
+        "HostAccess",
+        "EffectiveBackendCapabilities",
+        "EnvironmentRuntimeState",
+    }
+
+    assert host_owned_names.isdisjoint(public_contract.__all__)
+    assert all(not hasattr(public_contract, name) for name in host_owned_names)
+
+
+@pytest.mark.parametrize(
+    ("host_access", "verified", "expected"),
+    [
+        ("unknown", False, False),
+        ("unknown", True, False),
+        ("possible", True, False),
+        ("direct", True, False),
+        ("none", False, False),
+        ("none", True, True),
+    ],
+)
+def test_runtime_host_access_state_fails_closed(host_access, verified, expected):
+    from tools.environments.definitions import EnvironmentRuntimeState, HostAccess
+
+    state = EnvironmentRuntimeState(
+        backend_name="backend",
+        task_id="task-1",
+        host_access=HostAccess(host_access),
+        isolation_verified_by_host=verified,
+    )
+
+    assert state.has_verified_no_host_access is expected
 
 
 def test_backend_definition_validates_public_registration_contract():
@@ -194,7 +268,13 @@ def test_terminal_backend_registry_rejects_duplicate_names():
 
 
 def test_environment_manager_declares_lifecycle_surface_as_unimplemented():
+    from typing import get_type_hints
+
     from tools.environments import BackendFactoryRequest
+    from tools.environments.definitions import (
+        EffectiveBackendCapabilities,
+        EnvironmentRuntimeState,
+    )
     from tools.environments.manager import EnvironmentManager
     from tools.environments.registry import (
         TerminalBackendRegistry,
@@ -207,6 +287,13 @@ def test_environment_manager_declares_lifecycle_surface_as_unimplemented():
 
     assert manager.registry is registry
     assert EnvironmentManager().registry is terminal_backend_registry
+    assert (
+        get_type_hints(EnvironmentManager.get_effective_capabilities)["return"]
+        is EffectiveBackendCapabilities
+    )
+    assert get_type_hints(EnvironmentManager.get_runtime_state)["return"] == (
+        EnvironmentRuntimeState | None
+    )
 
     operations = [
         lambda: manager.resolve_backend("coder"),
@@ -214,7 +301,8 @@ def test_environment_manager_declares_lifecycle_surface_as_unimplemented():
         lambda: manager.get_or_create_environment(request),
         lambda: manager.get_active_environment("task-1"),
         lambda: manager.get_effective_backend_name("task-1"),
-        lambda: manager.get_capabilities("task-1"),
+        lambda: manager.get_effective_capabilities("task-1"),
+        lambda: manager.get_runtime_state("task-1"),
         lambda: manager.register_task_overrides("task-1", {"backend": "coder"}),
         lambda: manager.resolve_task_overrides("task-1"),
         lambda: manager.clear_task_overrides("task-1"),

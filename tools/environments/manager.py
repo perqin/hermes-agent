@@ -10,9 +10,10 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from tools.environments.definitions import (
-    BackendCapabilities,
     BackendDefinition,
     BackendFactoryRequest,
+    EffectiveBackendCapabilities,
+    EnvironmentRuntimeState,
 )
 from tools.environments.registry import (
     TerminalBackendRegistry,
@@ -58,8 +59,12 @@ class EnvironmentManager:
         """Return the backend selected for a task."""
         _not_implemented()
 
-    def get_capabilities(self, task_id: str) -> BackendCapabilities:
-        """Return host-consumed capabilities for a task's selected backend."""
+    def get_effective_capabilities(self, task_id: str) -> EffectiveBackendCapabilities:
+        """Return host-resolved capabilities for a task's selected backend."""
+        _not_implemented()
+
+    def get_runtime_state(self, task_id: str) -> EnvironmentRuntimeState | None:
+        """Return host-observed state for an active task environment."""
         _not_implemented()
 
     def register_task_overrides(

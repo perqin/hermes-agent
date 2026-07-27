@@ -38,7 +38,7 @@ Each backend definition must describe at least:
 - A stable canonical backend name and a human-readable label.
 - A factory that creates `BaseEnvironment` instances.
 - A side-effect-free availability/dependency check.
-- Backend capabilities used for host decisions instead of name-based checks.
+- Static backend capability declarations used as inputs to host resolution instead of name-based checks. Definitions never carry request-specific host-access state.
 - A configuration schema, installation guidance, and diagnostic metadata.
 - Source information such as built-in versus plugin and the owning plugin, for status display and conflict diagnosis.
 
@@ -100,16 +100,22 @@ Configuration principles:
 
 ### 6. Replace backend-name sets with a capability model
 
-Gradually replace core checks of the form "if the backend name is in this set" with registry capability queries. At minimum, capabilities cover:
+Gradually replace core checks of the form "if the backend name is in this set" with host-owned state queries. Keep three distinct data layers:
+
+1. **Static declaration (`BackendCapabilities`)**: plugin-supplied support flags and defaults stored in the registry definition. These values drive compatibility, setup, and initial resolution only; they never authorize approval bypass.
+2. **Effective state (`EffectiveBackendCapabilities`)**: the Environment Manager resolves the declaration against common configuration, backend-specific configuration, task overrides, and the current factory request. Request-dependent values such as Docker filesystem semantics and possible host access live here, not in the registry definition.
+3. **Runtime state (`EnvironmentRuntimeState`)**: after creation, the Environment Manager records host-observed properties of the actual environment instance. Security consumers use this state rather than reading the plugin definition or recomputing backend-specific configuration independently.
+
+Static and effective capabilities cover:
 
 - Execution locality: host-local or remote.
 - Filesystem/path semantics: host filesystem, isolated POSIX filesystem, or shared/mounted host filesystem.
 - Cwd policy: whether host cwd is accepted and whether sandbox cwd mapping is required.
 - Image/resource model: whether image, CPU, memory, disk, and similar common sandbox parameters are accepted.
 - Optional process, PTY, and file-transfer support.
-- Persistence/reuse properties and host-access state.
+- Persistence/reuse properties. Host-access state exists only in effective and runtime state.
 
-Capabilities drive prompting, path conversion, configuration presentation, and tool adaptation, but must never allow a plugin to grant itself additional security privileges.
+Declarations drive configuration presentation and resolution. Effective state drives prompting, path conversion, and tool adaptation. Runtime state drives security decisions. None of these APIs allow a plugin declaration to grant additional security privileges.
 
 ### 7. Keep security boundaries under host control
 
@@ -120,7 +126,10 @@ Therefore:
 - User plugins must be explicitly enabled. Installation does not imply trust.
 - Custom backends use a conservative security policy by default: assume possible host access and keep dangerous-command approval enabled.
 - A plugin's `isolated` declaration may affect display or path compatibility, but cannot by itself bypass approval.
-- Security-sensitive capabilities such as approval bypass, host mounts, and built-in backend overrides must be host-verifiable or explicitly authorized by user policy.
+- The Environment Manager resolves effective host access from host configuration and task overrides, then records host-observed runtime state after creation. Missing, unknown, possible, or unverified host access keeps dangerous-command approval enabled.
+- Approval bypass requires runtime state whose `has_verified_no_host_access` predicate is true: the host verified isolation and observed `host_access=none`. Plugin-returned metadata alone is never sufficient.
+- The legacy adapter preserves `_docker_has_host_access(config)` as the compatibility resolver during migration. Terminal and `execute_code` consume the same façade/manager state instead of calculating host access independently.
+- Security-sensitive operations such as built-in backend overrides must be host-verifiable or explicitly authorized by user policy.
 - The registry validates names, factory callability, and definition structure during registration. A factory result must be a `BaseEnvironment` instance before it enters the active cache.
 - Plugin failures are isolated at discovery, registration, and factory boundaries and include source identity in diagnostics. They must not trigger fallback to the more dangerous local backend.
 
@@ -150,7 +159,7 @@ The final cutover removes only the feature-flag router and legacy adapter. Termi
 Gradually route all backend-related calls through one host-owned runtime façade. It exposes domain operations rather than leaking the legacy implementation's dictionaries, locks, or private factory. Its minimum responsibilities are:
 
 - Get or create an environment for a task.
-- Query effective backend identity, active environments, and host-trusted capabilities.
+- Query static declarations, host-resolved effective capabilities, and host-observed runtime state through distinct methods.
 - Register, read, and clear task overrides.
 - Mark activity and perform task-level and global cleanup.
 - Invalidate derived caches such as file-operation wrappers with the environment lifecycle.
@@ -216,7 +225,7 @@ Validation uses:
 
 ### Phase D: Implement the registry runtime skeleton
 
-- Define the backend definition, factory request, capability, availability, and error contracts.
+- Define the backend definition, factory request, static capability declaration, effective capability state, runtime environment state, availability, and error contracts.
 - Establish the terminal backend registry, Environment Manager, and `PluginContext` registration API.
 - Use a fake backend to lock down: registration does not instantiate; explicit failures do not fall back; concurrent calls create once; factories must return `BaseEnvironment`; and cleanup runs exactly once.
 - Ensure plugin discovery completes before backend resolution across CLI, gateway, cron, TUI/API, and direct tool-call paths.
@@ -230,9 +239,10 @@ Validation uses:
 
 ### Phase F: Switch capability and peripheral consumers
 
-- Expose unified capability queries through the façade. The legacy adapter synthesizes equivalent capabilities from existing names/configuration, while the new adapter reads registry definitions.
-- Migrate remote, container, path, prompt, and approval decisions to façade capabilities so peripheral code does not know the runtime mode.
-- Keep security capabilities under host policy; neither the experimental path nor plugin declarations may loosen approval.
+- Expose separate declaration, effective-state, and runtime-state queries through the façade. The legacy adapter synthesizes effective/runtime state from existing configuration and active environments; the new adapter combines registry declarations with manager-owned resolution and observation.
+- Migrate remote, container, path, and prompt decisions to effective capabilities so peripheral code does not know the runtime mode.
+- Migrate approval decisions to host-observed runtime state. Terminal and `execute_code` must use the same state object and must not independently reinterpret backend configuration.
+- Keep approval policy under host control; neither the experimental path nor plugin declarations may loosen approval.
 - Make setup, dashboard, status, dump, and diagnostics present the experimental registry dynamically while clearly identifying the active runtime mode.
 
 ### Phase G: Validate plugin configuration end to end
@@ -292,6 +302,9 @@ Validation uses:
 
 - Remote, path, and prompt behavior follows capabilities without adding third-party names to hard-coded sets.
 - A custom backend declaring itself isolated does not automatically bypass dangerous-command approval.
+- Registry definitions contain no request-specific host-access state. Docker bind mounts and cwd mounts produce different effective/runtime states for otherwise identical definitions.
+- Missing or unverified runtime state fails closed and keeps approval enabled. Only host-verified isolation with `host_access=none` can bypass the container approval layer.
+- Terminal and `execute_code` receive the same manager-owned runtime host-access state for a task.
 - Explicit configuration failures never silently degrade to local.
 - Existing approval and host-mount behavior for built-in backends remains unchanged.
 
@@ -313,6 +326,7 @@ If running the full suite twice is too expensive, every PR must run backend cont
 - **Plugin discovery occurs too late**: the Environment Manager explicitly triggers idempotent discovery before first resolution instead of assuming a CLI import already performed it.
 - **Peripheral code still branches on backend names**: maintain a capability-consumer inventory and validate end to end with a test backend whose name is unknown to core code.
 - **Plugins falsify isolation metadata**: security decisions do not directly trust plugin declarations; defaults remain conservative, and relaxation requires host or user-policy authorization.
+- **Effective and runtime state drift**: Environment Manager owns both records, refreshes runtime state after creation, and invalidates it with environment cleanup. Approval fails closed when runtime state is absent or no longer matches the active instance.
 - **Multiple tools continue duplicating creation logic**: consolidate the Environment Manager before exposing a stable plugin contract, so third parties never depend on private terminal state.
 - **Backend configuration schemas expand core indefinitely**: namespace plugin-specific fields and provide schema/setup metadata through backend definitions.
 - **Built-in backend overrides introduce supply-chain risk**: reject duplicate names by default and treat override as a separate high-trust capability, not ordinary registry behavior.

@@ -19,7 +19,6 @@ from tools.environments.definitions import (
     BackendFactoryRequest,
     ExecutionLocation,
     FilesystemSemantics,
-    HostAccess,
 )
 
 __all__ = [
@@ -31,5 +30,4 @@ __all__ = [
     "BaseEnvironment",
     "ExecutionLocation",
     "FilesystemSemantics",
-    "HostAccess",
 ]
