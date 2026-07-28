@@ -1,7 +1,8 @@
 """Host-owned lifecycle manager for terminal backend environments.
 
-The public signatures are defined in the contract phase. Runtime behavior will
-be implemented behind EXP_BACKEND in later changes.
+The first EXP_BACKEND migration slice implements registry resolution and
+factory-backed creation. Task-scoped reuse, overrides, runtime state, and
+cleanup remain explicit stubs until their callers migrate together.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from tools.environments.definitions import (
     EnvironmentRuntimeState,
 )
 from tools.environments.registry import (
+    BackendUnavailableError,
     TerminalBackendRegistry,
     terminal_backend_registry,
 )
@@ -37,13 +39,30 @@ class EnvironmentManager:
     def __init__(self, registry: TerminalBackendRegistry | None = None) -> None:
         self.registry = registry if registry is not None else terminal_backend_registry
 
+        from tools.environments.builtin_backends import (
+            register_builtin_terminal_backends,
+        )
+
+        register_builtin_terminal_backends(self.registry)
+
     def resolve_backend(self, name: str) -> BackendDefinition:
         """Resolve the selected backend definition."""
-        _not_implemented()
+        definition = self.registry.require(name)
+        if not definition.is_available():
+            raise BackendUnavailableError(f"Terminal backend {name!r} is unavailable")
+        return definition
 
     def create_environment(self, request: BackendFactoryRequest) -> "BaseEnvironment":
         """Create a new environment for a fully resolved request."""
-        _not_implemented()
+        from tools.environments.base import BaseEnvironment
+
+        definition = self.resolve_backend(request.backend_name)
+        environment = definition.factory(request)
+        if not isinstance(environment, BaseEnvironment):
+            raise TypeError(
+                f"Terminal backend {definition.name!r} factory must return BaseEnvironment"
+            )
+        return environment
 
     def get_or_create_environment(
         self, request: BackendFactoryRequest

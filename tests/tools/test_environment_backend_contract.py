@@ -267,7 +267,7 @@ def test_terminal_backend_registry_rejects_duplicate_names():
         registry.register(object())
 
 
-def test_environment_manager_declares_lifecycle_surface_as_unimplemented():
+def test_environment_manager_leaves_unmigrated_lifecycle_surface_unimplemented():
     from typing import get_type_hints
 
     from tools.environments import BackendFactoryRequest
@@ -277,6 +277,7 @@ def test_environment_manager_declares_lifecycle_surface_as_unimplemented():
     )
     from tools.environments.manager import EnvironmentManager
     from tools.environments.registry import (
+        BackendNotFoundError,
         TerminalBackendRegistry,
         terminal_backend_registry,
     )
@@ -295,9 +296,10 @@ def test_environment_manager_declares_lifecycle_surface_as_unimplemented():
         EnvironmentRuntimeState | None
     )
 
+    with pytest.raises(BackendNotFoundError, match="coder"):
+        manager.resolve_backend("coder")
+
     operations = [
-        lambda: manager.resolve_backend("coder"),
-        lambda: manager.create_environment(request),
         lambda: manager.get_or_create_environment(request),
         lambda: manager.get_active_environment("task-1"),
         lambda: manager.get_effective_backend_name("task-1"),

@@ -175,10 +175,11 @@ def test_invalid_exp_backend_value_warns_and_uses_legacy(
     assert "legacy" in caplog.text
 
 
-def test_terminal_factory_uses_unimplemented_manager_when_exp_backend_is_one(
-    monkeypatch,
+def test_terminal_factory_uses_registry_local_backend_when_exp_backend_is_one(
+    monkeypatch, tmp_path
 ):
     from tools.environments.facade import reset_environment_facade
+    from tools.environments.local import LocalEnvironment
     from tools import terminal_tool
 
     monkeypatch.setenv("EXP_BACKEND", "1")
@@ -189,5 +190,32 @@ def test_terminal_factory_uses_unimplemented_manager_when_exp_backend_is_one(
         lambda *args, **kwargs: pytest.fail("legacy runtime was called"),
     )
 
-    with pytest.raises(NotImplementedError, match="experimental backend runtime"):
+    environment = terminal_tool._create_environment(
+        "local", "ignored", str(tmp_path), 30
+    )
+    try:
+        assert isinstance(environment, LocalEnvironment)
+        result = environment.execute("printf facade-local")
+        assert result["returncode"] == 0
+        assert "facade-local" in result["output"]
+    finally:
+        environment.cleanup()
+
+
+def test_terminal_factory_rejects_unregistered_backend_without_legacy_fallback(
+    monkeypatch,
+):
+    from tools.environments.facade import reset_environment_facade
+    from tools.environments.registry import BackendNotFoundError
+    from tools import terminal_tool
+
+    monkeypatch.setenv("EXP_BACKEND", "1")
+    reset_environment_facade()
+    monkeypatch.setattr(
+        terminal_tool,
+        "_create_environment_legacy",
+        lambda *args, **kwargs: pytest.fail("legacy runtime was called"),
+    )
+
+    with pytest.raises(BackendNotFoundError, match="coder"):
         terminal_tool._create_environment("coder", "", "/workspace", 30)

@@ -19,6 +19,10 @@ class BackendNotFoundError(LookupError):
     """Raised when a requested terminal backend is not registered."""
 
 
+class BackendUnavailableError(RuntimeError):
+    """Raised when a registered terminal backend is unavailable."""
+
+
 class TerminalBackendRegistry:
     """Thread-safe collection of terminal backend definitions."""
 
