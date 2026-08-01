@@ -1293,6 +1293,7 @@ class TestEnvironmentHints:
         import agent.prompt_builder as _pb
         monkeypatch.setattr(_pb, "is_wsl", lambda: False)
         monkeypatch.setenv("TERMINAL_ENV", "modal")
+        monkeypatch.setenv("EXP_BACKEND", "0")
         fake_probe_output = "  OS: Linux 6.8.0\n  User: root\n  Home: /root\n  Working directory: /workspace"
         monkeypatch.setattr(_pb, "_probe_remote_backend", lambda _t: fake_probe_output)
         _pb._clear_backend_probe_cache()

@@ -45,6 +45,16 @@ def _local_backend_definition() -> BackendDefinition:
     )
 
 
+def is_canonical_builtin_local_backend(definition: BackendDefinition | None) -> bool:
+    """Return whether *definition* is the host-owned built-in local backend.
+
+    Plugin declarations are unverified metadata. Callers deciding whether it is
+    safe to expose host-only information must not trust a third party merely
+    because it declares ``execution_location=LOCAL``.
+    """
+    return definition == _local_backend_definition()
+
+
 def register_builtin_terminal_backends(registry: "TerminalBackendRegistry") -> None:
     """Register built-ins, rejecting any altered definition of a reserved name."""
     canonical = _local_backend_definition()

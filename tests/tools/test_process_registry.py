@@ -720,6 +720,7 @@ class TestSpawnEnvSanitization:
 
         bg_command = env.commands[0][0]
         assert session.pid == 4321
+        assert env.commands[0][1]["cwd"] is None
         assert "/data/data/com.termux/files/usr/tmp/hermes_bg_" in bg_command
         assert ".exit" in bg_command
         assert "rc=$?;" in bg_command
@@ -773,6 +774,44 @@ class TestSpawnEnvSanitization:
         args, kwargs = env.commands[0]
         assert kwargs.get("rewrite_compound_background") is False
 
+    def test_spawn_via_env_preserves_sanitized_cwd_for_launch_and_polling(self, registry):
+        class FakeEnv:
+            def __init__(self):
+                self.commands = []
+                self._responses = iter([
+                    {"output": "4321\n", "returncode": 0},
+                    {"output": "done\n"},
+                    {"output": "1\n"},
+                    {"output": "0\n"},
+                ])
+
+            def get_temp_dir(self):
+                return "/tmp"
+
+            def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return next(self._responses)
+
+        env = FakeEnv()
+        fake_thread = MagicMock()
+        with patch("tools.process_registry.threading.Thread", return_value=fake_thread), \
+            patch.object(registry, "_write_checkpoint"):
+            session = registry.spawn_via_env(env, "pwd", cwd="~")
+
+        assert env.commands[0][1]["cwd"] == "~"
+
+        with patch("tools.process_registry.time.sleep", return_value=None), \
+            patch.object(registry, "_move_to_finished"):
+            registry._env_poller_loop(
+                session,
+                env,
+                "/tmp/hermes_bg.log",
+                "/tmp/hermes_bg.pid",
+                "/tmp/hermes_bg.exit",
+            )
+
+        assert all(kwargs["cwd"] == "~" for _, kwargs in env.commands)
+
     def test_env_poller_quotes_temp_paths_with_spaces(self, registry):
         session = _make_session(sid="proc_space")
         session.exited = False
@@ -805,6 +844,7 @@ class TestSpawnEnvSanitization:
         assert env.commands[0][0] == "cat '/path with spaces/hermes_bg.log' 2>/dev/null"
         assert env.commands[1][0] == "kill -0 \"$(cat '/path with spaces/hermes_bg.pid' 2>/dev/null)\" 2>/dev/null; echo $?"
         assert env.commands[2][0] == "cat '/path with spaces/hermes_bg.exit' 2>/dev/null"
+        assert all(kwargs["cwd"] == session.cwd for _, kwargs in env.commands)
 
 
 # =========================================================================
@@ -1122,6 +1162,25 @@ class TestKillProcess:
 
         assert result["status"] == "killed"
         assert terminate_calls == [(12345, 67890)]
+
+    def test_kill_remote_process_preserves_sanitized_cwd(self, registry, monkeypatch):
+        env = MagicMock()
+        env.execute.return_value = {"output": "", "returncode": 0}
+        session = _make_session(sid="proc_remote", command="sleep 999")
+        session.cwd = "~"
+        session.env_ref = env
+        session.pid = 4321
+        registry._running[session.id] = session
+        monkeypatch.setattr(registry, "_write_checkpoint", lambda: None)
+
+        result = registry.kill_process(session.id)
+
+        assert result["status"] == "killed"
+        env.execute.assert_called_once_with(
+            "kill 4321 2>/dev/null",
+            timeout=5,
+            cwd="~",
+        )
 
     def test_kill_detached_session_uses_host_pid(self, registry):
         s = _make_session(sid="proc_detached", command="sleep 999")

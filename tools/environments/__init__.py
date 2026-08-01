@@ -10,7 +10,7 @@ runtime. Third-party plugins import only the backend definitions re-exported by
 this package; host lifecycle services remain in their dedicated modules.
 """
 
-from tools.environments.base import BaseEnvironment
+from tools.environments.base import BaseEnvironment, _ThreadedProcessHandle
 from tools.environments.definitions import (
     AvailabilityCheck,
     BackendCapabilities,
@@ -21,6 +21,13 @@ from tools.environments.definitions import (
     FilesystemSemantics,
 )
 
+from tools.environments.forward_env import (
+    collect_forwarded_env_values,
+    normalize_forward_env_names,
+)
+
+ThreadedProcessHandle = _ThreadedProcessHandle
+
 __all__ = [
     "AvailabilityCheck",
     "BackendCapabilities",
@@ -30,4 +37,7 @@ __all__ = [
     "BaseEnvironment",
     "ExecutionLocation",
     "FilesystemSemantics",
+    "ThreadedProcessHandle",
+    "collect_forwarded_env_values",
+    "normalize_forward_env_names",
 ]

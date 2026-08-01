@@ -140,14 +140,20 @@ class BackendDefinition:
     diagnostic_metadata: Mapping[str, Any] = field(default_factory=dict)
     source: str = ""
     plugin_name: str = ""
+    default_cwd: str = ""
+    config_resolver: Callable[[], Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _BACKEND_NAME_RE.fullmatch(self.name):
             raise ValueError("backend name must match ^[a-z][a-z0-9_-]*$")
         if not callable(self.factory):
             raise TypeError("backend factory must be callable")
+        if not isinstance(self.default_cwd, str):
+            raise TypeError("backend default_cwd must be a string")
         if not callable(self.availability_check):
             raise TypeError("availability_check must be callable")
+        if self.config_resolver is not None and not callable(self.config_resolver):
+            raise TypeError("config_resolver must be callable")
         if self.config_schema is not None:
             self.config_schema = dict(self.config_schema)
         self.diagnostic_metadata = dict(self.diagnostic_metadata)

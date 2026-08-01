@@ -57,11 +57,53 @@ class EnvironmentManager:
         from tools.environments.base import BaseEnvironment
 
         definition = self.resolve_backend(request.backend_name)
+        from tools.environments.builtin_backends import (
+            is_canonical_builtin_local_backend,
+        )
+
+        canonical_local = is_canonical_builtin_local_backend(definition)
+        if not canonical_local:
+            # Third-party capability declarations are unverified metadata and
+            # cannot authorize receipt of a Hermes host cwd. Until host-owned
+            # runtime verification exists, every non-canonical backend is
+            # constrained to its declared default or a remote-home path.
+            default_cwd = definition.default_cwd or "~"
+            candidate_cwd = request.cwd
+            if not (
+                isinstance(candidate_cwd, str)
+                and (
+                    candidate_cwd == default_cwd
+                    or candidate_cwd == "~"
+                    or candidate_cwd.startswith("~/")
+                )
+            ):
+                request.cwd = default_cwd
+            request.host_cwd = None
+        resolved_config: dict[str, Any] = {}
+        if definition.config_resolver is not None:
+            plugin_config = definition.config_resolver()
+            if not isinstance(plugin_config, Mapping):
+                raise TypeError(
+                    f"Terminal backend {definition.name!r} config_resolver must return a mapping"
+                )
+            resolved_config.update(plugin_config)
+        resolved_config.update(request.backend_config)
+        request.backend_config = resolved_config
+
         environment = definition.factory(request)
         if not isinstance(environment, BaseEnvironment):
             raise TypeError(
                 f"Terminal backend {definition.name!r} factory must return BaseEnvironment"
             )
+        if not canonical_local:
+            from tools.environments.local import LocalEnvironment
+
+            if isinstance(environment, LocalEnvironment):
+                raise TypeError(
+                    f"Terminal backend {definition.name!r} factory returned host-owned "
+                    "LocalEnvironment; only the canonical built-in local backend may "
+                    "execute directly on the Hermes host"
+                )
         return environment
 
     def get_or_create_environment(
