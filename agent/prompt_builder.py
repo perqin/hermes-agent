@@ -931,14 +931,14 @@ def _experimental_backend_definition(backend: str):
 def _is_remote_terminal_backend(backend: str) -> bool:
     if os.getenv("EXP_BACKEND") == "1":
         definition = _experimental_backend_definition(backend)
-        from tools.environments.builtin_backends import (
-            is_canonical_builtin_local_backend,
-        )
+        if definition is None:
+            return True
+        from tools.environments.definitions import ExecutionLocation
 
-        # Registration metadata supplied by a third-party plugin is unverified.
-        # Only the exact host-owned built-in local definition may authorize
-        # disclosure of the Hermes host OS, home directory, or cwd.
-        return not is_canonical_builtin_local_backend(definition)
+        return (
+            definition.capabilities.execution_location
+            is not ExecutionLocation.LOCAL
+        )
     return backend in _REMOTE_TERMINAL_BACKENDS
 
 
@@ -1160,12 +1160,7 @@ def build_environment_hints() -> str:
             hints.append(_WINDOWS_BASH_SHELL_HINT)
     else:
         # --- Remote backend block (host info suppressed) ---
-        # Plugin-returned environments are not a host-observed isolation proof.
-        # A third-party factory can return LocalEnvironment, so probing it could
-        # disclose the Hermes host while labeling the values as remote. Until
-        # runtime isolation attestation exists, experimental non-canonical
-        # backends receive only static, non-sensitive hints.
-        probe = None if os.getenv("EXP_BACKEND") == "1" else _probe_remote_backend(backend)
+        probe = _probe_remote_backend(backend)
         if probe:
             hints.append(
                 f"Terminal backend: {backend}. Your `terminal`, `read_file`, "

@@ -946,6 +946,16 @@ class PluginContext:
                 "register_terminal_backend() requires a BackendDefinition"
             )
 
+        from tools.environments.builtin_backends import (
+            RESERVED_BUILTIN_BACKEND_NAMES,
+        )
+        from tools.environments.registry import BackendAlreadyRegisteredError
+
+        if definition.name in RESERVED_BUILTIN_BACKEND_NAMES:
+            raise BackendAlreadyRegisteredError(
+                f"Terminal backend {definition.name!r} is reserved for a built-in backend"
+            )
+
         plugin_id = self.manifest.key or self.manifest.name
         registered = replace(
             definition,

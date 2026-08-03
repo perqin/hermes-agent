@@ -106,7 +106,7 @@ def test_plugin_instance_cwd_is_not_host_verified(monkeypatch):
         (FilesystemSemantics.ISOLATED, True, True),
     ],
 )
-def test_terminal_rejects_task_cwd_override_for_unverified_plugin(
+def test_terminal_uses_declared_filesystem_semantics_for_task_cwd(
     monkeypatch, semantics, requires_sandbox_cwd, accepts_host_cwd
 ):
     import tools.terminal_tool as terminal_tool
@@ -156,7 +156,106 @@ def test_terminal_rejects_task_cwd_override_for_unverified_plugin(
     result = json.loads(terminal_tool.terminal_tool(command="pwd", task_id=task_id))
 
     assert result["exit_code"] == 0
-    assert calls == [("pwd", {"timeout": 60, "cwd": "~", "bounded_capture": True})]
+    expected_cwd = (
+        "~"
+        if (semantics is FilesystemSemantics.ISOLATED or requires_sandbox_cwd)
+        else "/opt/host-only/project"
+    )
+    assert calls == [
+        ("pwd", {"timeout": 60, "cwd": expected_cwd, "bounded_capture": True})
+    ]
+
+
+def test_execute_code_sanitizes_task_cwd_for_isolated_backend(monkeypatch):
+    import tools.code_execution_tool as code_execution_tool
+    import tools.terminal_tool as terminal_tool
+
+    definition = _definition()
+    definition.default_cwd = "~"
+    terminal_backend_registry.register(definition)
+    monkeypatch.setenv("EXP_BACKEND", "1")
+    monkeypatch.setenv("TERMINAL_ENV", definition.name)
+
+    task_id = "isolated-execute-code-task"
+    received: dict[str, object] = {}
+    environment = object()
+
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
+    monkeypatch.setattr(terminal_tool, "_last_activity", {})
+    monkeypatch.setattr(terminal_tool, "_creation_locks", {})
+    monkeypatch.setattr(
+        terminal_tool, "resolve_task_overrides", lambda _task_id: {"cwd": "/opt/host-only/project"}
+    )
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_env_config",
+        lambda: {
+            "env_type": definition.name,
+            "cwd": "~",
+            "host_cwd": None,
+            "timeout": 60,
+        },
+    )
+
+    def create_environment(**kwargs):
+        received.update(kwargs)
+        return environment
+
+    monkeypatch.setattr(terminal_tool, "_create_environment", create_environment)
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+
+    resolved_environment, env_type = code_execution_tool._get_or_create_env(task_id)
+
+    assert resolved_environment is environment
+    assert env_type == definition.name
+    assert received["cwd"] == "~"
+
+
+def test_file_tools_sanitize_task_cwd_when_creating_isolated_backend(monkeypatch):
+    import tools.file_tools as file_tools
+    import tools.terminal_tool as terminal_tool
+
+    definition = _definition()
+    definition.default_cwd = "~"
+    terminal_backend_registry.register(definition)
+    monkeypatch.setenv("EXP_BACKEND", "1")
+    monkeypatch.setenv("TERMINAL_ENV", definition.name)
+
+    task_id = "isolated-file-tools-task"
+    received: dict[str, object] = {}
+    environment = MagicMock(spec=BaseEnvironment)
+    environment.cwd = "~"
+
+    monkeypatch.setattr(file_tools, "_file_ops_cache", {})
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
+    monkeypatch.setattr(terminal_tool, "_last_activity", {})
+    monkeypatch.setattr(terminal_tool, "_creation_locks", {})
+    monkeypatch.setattr(
+        terminal_tool,
+        "resolve_task_overrides",
+        lambda _task_id: {"cwd": "/opt/host-only/project"},
+    )
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_env_config",
+        lambda: {
+            "env_type": definition.name,
+            "cwd": "~",
+            "host_cwd": None,
+            "timeout": 60,
+        },
+    )
+
+    def create_environment(**kwargs):
+        received.update(kwargs)
+        return environment
+
+    monkeypatch.setattr(terminal_tool, "_create_environment", create_environment)
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+
+    file_tools._get_file_ops(task_id)
+
+    assert received["cwd"] == "~"
 
 
 def test_background_terminal_passes_sanitized_cwd_to_plugin_local_environment(
@@ -295,7 +394,7 @@ def test_experimental_unknown_location_suppresses_host_prompt(monkeypatch):
     assert "Current working directory:" not in hint
 
 
-def test_third_party_local_declaration_cannot_expose_host_prompt(monkeypatch):
+def test_experimental_local_capability_exposes_host_prompt(monkeypatch):
     import agent.prompt_builder as prompt_builder
 
     definition = _definition()
@@ -309,33 +408,31 @@ def test_third_party_local_declaration_cannot_expose_host_prompt(monkeypatch):
 
     hint = prompt_builder.build_environment_hints()
 
-    assert "Host:" not in hint
-    assert "User home directory:" not in hint
-    assert "Current working directory:" not in hint
+    assert "Host:" in hint
+    assert "User home directory:" in hint
+    assert "Current working directory:" in hint
 
 
-def test_experimental_plugin_does_not_run_sensitive_live_probe(monkeypatch):
+def test_experimental_plugin_runs_live_remote_probe(monkeypatch):
     import agent.prompt_builder as prompt_builder
     from tools.environments.local import LocalEnvironment
 
     definition = _definition()
-    definition.factory = lambda _request: LocalEnvironment(cwd="/home/yuki-bot")
-    definition.capabilities.execution_location = ExecutionLocation.LOCAL
-    definition.capabilities.filesystem_semantics = FilesystemSemantics.HOST
+    definition.factory = lambda _request: LocalEnvironment(cwd="/home/coder")
     terminal_backend_registry.register(definition)
     monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
-    probe = MagicMock(return_value="OS: Linux\nUser: yuki-bot\nHome: /home/yuki-bot")
+    probe = MagicMock(return_value="OS: Linux\nUser: coder\nHome: /home/coder")
     monkeypatch.setattr(prompt_builder, "_probe_remote_backend", probe)
 
     hint = prompt_builder.build_environment_hints()
 
-    probe.assert_not_called()
-    assert "yuki-bot" not in hint
-    assert "/home/yuki-bot" not in hint
+    probe.assert_called_once_with(definition.name)
+    assert "User: coder" in hint
+    assert "Home: /home/coder" in hint
 
 
-def test_third_party_local_declaration_cannot_enable_host_path_resolution(monkeypatch):
+def test_experimental_host_filesystem_uses_host_path_resolution(monkeypatch):
     from tools.file_tools import _uses_container_paths
 
     definition = _definition()
@@ -345,10 +442,10 @@ def test_third_party_local_declaration_cannot_enable_host_path_resolution(monkey
     monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
 
-    assert _uses_container_paths() is True
+    assert _uses_container_paths() is False
 
 
-def test_experimental_file_paths_ignore_environment_class_and_host_cwd(monkeypatch):
+def test_experimental_file_paths_follow_isolated_filesystem_semantics(monkeypatch):
     import tools.terminal_tool as terminal_tool
     from tools.environments.local import LocalEnvironment
     from tools.file_tools import (
@@ -389,9 +486,36 @@ def test_threaded_process_handle_is_public_plugin_contract():
 
 @pytest.mark.parametrize(
     "backend_name",
+    [
+        "local",
+        "docker",
+        "singularity",
+        "modal",
+        "managed_modal",
+        "daytona",
+        "ssh",
+        "vercel_sandbox",
+    ],
+)
+def test_plugin_context_rejects_reserved_builtin_backend_names(backend_name):
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+    from tools.environments.registry import BackendAlreadyRegisteredError
+
+    context = PluginContext(
+        PluginManifest(name="third-party", source="user"), PluginManager()
+    )
+
+    definition = _definition()
+    definition.name = backend_name
+    with pytest.raises(BackendAlreadyRegisteredError, match="reserved"):
+        context.register_terminal_backend(definition)
+
+
+@pytest.mark.parametrize(
+    "backend_name",
     ["docker", "modal", "singularity", "daytona", "ssh", "vercel_sandbox"],
 )
-def test_experimental_registered_names_never_skip_hardline_guards(
+def test_experimental_preserves_legacy_container_guard_behavior(
     monkeypatch, backend_name
 ):
     from tools.approval import check_dangerous_command
@@ -400,14 +524,14 @@ def test_experimental_registered_names_never_skip_hardline_guards(
 
     result = check_dangerous_command("rm -rf /", backend_name, has_host_access=True)
 
-    assert result["approved"] is False
+    assert result["approved"] is (backend_name in {"modal", "singularity", "daytona"})
 
 
 @pytest.mark.parametrize(
     "backend_name",
     ["docker", "modal", "singularity", "daytona", "ssh", "vercel_sandbox"],
 )
-def test_experimental_registered_names_never_skip_execute_code_guard(
+def test_experimental_preserves_legacy_execute_code_guard_behavior(
     monkeypatch, backend_name
 ):
     import tools.approval as approval
@@ -422,7 +546,9 @@ def test_experimental_registered_names_never_skip_execute_code_guard(
         has_host_access=True,
     )
 
-    assert result["approved"] is False
+    assert result["approved"] is (
+        backend_name in {"modal", "singularity", "daytona", "vercel_sandbox"}
+    )
 
 
 def test_forward_env_helper_preserves_explicit_opt_in_and_filters_implicit_secrets(
@@ -572,7 +698,7 @@ def test_manager_resolves_plugin_config_before_calling_factory():
     }
 
 
-def test_manager_sanitizes_isolated_factory_request_cwd_and_host_cwd():
+def test_manager_preserves_factory_request_cwd_and_host_cwd():
     from tools.environments.manager import EnvironmentManager
 
     received: dict[str, object] = {}
@@ -595,7 +721,10 @@ def test_manager_sanitizes_isolated_factory_request_cwd_and_host_cwd():
         )
     )
 
-    assert received == {"cwd": "~", "host_cwd": None}
+    assert received == {
+        "cwd": "/opt/host-only/project",
+        "host_cwd": "/opt/host-only/project",
+    }
 
 
 @pytest.mark.parametrize(
@@ -607,7 +736,7 @@ def test_manager_sanitizes_isolated_factory_request_cwd_and_host_cwd():
         (FilesystemSemantics.ISOLATED, True, True),
     ],
 )
-def test_manager_never_trusts_third_party_capabilities_for_host_cwd(
+def test_manager_does_not_rewrite_request_from_declared_capabilities(
     semantics, requires_sandbox_cwd, accepts_host_cwd
 ):
     from tools.environments.manager import EnvironmentManager
@@ -634,10 +763,30 @@ def test_manager_never_trusts_third_party_capabilities_for_host_cwd(
         )
     )
 
-    assert received == {"cwd": "~", "host_cwd": None}
+    assert received == {
+        "cwd": "/opt/host-only/project",
+        "host_cwd": "/opt/host-only/project",
+    }
 
 
-def test_manager_rejects_plugin_factory_returning_host_local_environment():
+def test_manager_accepts_local_plugin_factory_returning_local_environment():
+    from tools.environments.local import LocalEnvironment
+    from tools.environments.manager import EnvironmentManager
+
+    definition = _definition()
+    definition.capabilities.execution_location = ExecutionLocation.LOCAL
+    definition.capabilities.filesystem_semantics = FilesystemSemantics.HOST
+    definition.factory = lambda _request: LocalEnvironment(cwd="/opt/host-only")
+    terminal_backend_registry.register(definition)
+
+    environment = EnvironmentManager().create_environment(
+        BackendFactoryRequest(backend_name=definition.name)
+    )
+
+    assert isinstance(environment, LocalEnvironment)
+
+
+def test_manager_rejects_remote_plugin_factory_returning_local_environment():
     from tools.environments.local import LocalEnvironment
     from tools.environments.manager import EnvironmentManager
 
@@ -645,7 +794,7 @@ def test_manager_rejects_plugin_factory_returning_host_local_environment():
     definition.factory = lambda _request: LocalEnvironment(cwd="/opt/host-only")
     terminal_backend_registry.register(definition)
 
-    with pytest.raises(TypeError, match="host-owned LocalEnvironment"):
+    with pytest.raises(TypeError, match="declares remote execution"):
         EnvironmentManager().create_environment(
             BackendFactoryRequest(backend_name=definition.name)
         )

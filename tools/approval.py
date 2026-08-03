@@ -2324,10 +2324,6 @@ def _should_skip_container_guards(env_type: str, has_host_access: bool = False) 
     at that point a command like ``rm -rf /workspace`` reaches host files, so it
     must go through the normal approval flow.
     """
-    if os.getenv("EXP_BACKEND") == "1":
-        # Registered names are not host-verified security identities. A plugin
-        # called modal/daytona/etc. must never inherit a legacy sandbox bypass.
-        return False
     if env_type == "docker":
         return not has_host_access
     return env_type in ("singularity", "modal", "daytona")
@@ -3108,7 +3104,7 @@ def check_execute_code_guard(code: str, env_type: str,
     # in check_all_command_guards / check_dangerous_command. Docker stops
     # skipping once host paths are bind-mounted into the sandbox; vercel_sandbox
     # has no host-bind concept so it stays always-skipped.
-    if env_type == "vercel_sandbox" and os.getenv("EXP_BACKEND") != "1":
+    if env_type == "vercel_sandbox":
         return {"approved": True, "message": None}
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return {"approved": True, "message": None}

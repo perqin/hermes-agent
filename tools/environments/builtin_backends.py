@@ -17,6 +17,23 @@ if TYPE_CHECKING:
     from tools.environments.registry import TerminalBackendRegistry
 
 
+# Reserve every legacy built-in name before its definition is migrated. This
+# keeps the name-based legacy behavior stable without allowing third-party
+# plugins to claim a built-in identity during the incremental cutover.
+RESERVED_BUILTIN_BACKEND_NAMES = frozenset(
+    {
+        "local",
+        "docker",
+        "singularity",
+        "modal",
+        "managed_modal",
+        "daytona",
+        "ssh",
+        "vercel_sandbox",
+    }
+)
+
+
 def _create_local_environment(request: BackendFactoryRequest) -> "BaseEnvironment":
     from tools.environments.local import LocalEnvironment
 
@@ -43,16 +60,6 @@ def _local_backend_definition() -> BackendDefinition:
         ),
         source="builtin",
     )
-
-
-def is_canonical_builtin_local_backend(definition: BackendDefinition | None) -> bool:
-    """Return whether *definition* is the host-owned built-in local backend.
-
-    Plugin declarations are unverified metadata. Callers deciding whether it is
-    safe to expose host-only information must not trust a third party merely
-    because it declares ``execution_location=LOCAL``.
-    """
-    return definition == _local_backend_definition()
 
 
 def register_builtin_terminal_backends(registry: "TerminalBackendRegistry") -> None:

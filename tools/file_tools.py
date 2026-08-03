@@ -214,16 +214,19 @@ def _uses_container_paths(task_id: str = "default") -> bool:
     env_type = _terminal_env_type_for_task(task_id)
     if os.getenv("EXP_BACKEND") == "1":
         from tools.environments.builtin_backends import (
-            is_canonical_builtin_local_backend,
             register_builtin_terminal_backends,
         )
+        from tools.environments.definitions import FilesystemSemantics
         from tools.environments.registry import terminal_backend_registry
 
         register_builtin_terminal_backends(terminal_backend_registry)
-        # Third-party declarations are unverified. Fail closed by avoiding host
-        # path dereference unless this is the exact host-owned local backend.
         definition = terminal_backend_registry.get(env_type)
-        return not is_canonical_builtin_local_backend(definition)
+        if definition is None:
+            return True
+        return (
+            definition.capabilities.filesystem_semantics
+            is not FilesystemSemantics.HOST
+        )
     try:
         from tools.terminal_tool import _CONTAINER_BACKENDS
 
@@ -988,6 +991,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
         _creation_locks_lock,
         _resolve_container_task_id,
         _is_unusable_container_cwd,
+        _sanitize_registered_sandbox_cwd,
         _CONTAINER_BACKENDS,
     )
     import time
@@ -1072,6 +1076,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             # bypass the guard.  Valid in-container override paths (RL/benchmark
             # sandboxes that set cwd to /workspace, /root, etc.) are absolute
             # non-host paths and pass through untouched.
+            cwd = _sanitize_registered_sandbox_cwd(env_type, cwd, config["cwd"])
             if env_type in _CONTAINER_BACKENDS and _is_unusable_container_cwd(cwd):
                 if cwd != config["cwd"]:
                     logger.info(

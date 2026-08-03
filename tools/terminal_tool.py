@@ -1305,17 +1305,21 @@ def _is_unusable_container_cwd(cwd: str) -> bool:
     return False
 
 
-def _registered_unverified_backend_definition(env_type: str):
-    """Return a registered backend that is not the host-owned canonical local."""
+def _registered_sandbox_backend_definition(env_type: str):
+    """Return a registered backend that declares isolated filesystem semantics."""
     if os.getenv("EXP_BACKEND") != "1":
         return None
-    from tools.environments.builtin_backends import (
-        is_canonical_builtin_local_backend,
-    )
+    from tools.environments.definitions import FilesystemSemantics
     from tools.environments.registry import terminal_backend_registry
 
     definition = terminal_backend_registry.get(env_type)
-    if definition is None or is_canonical_builtin_local_backend(definition):
+    if definition is None:
+        return None
+    capabilities = definition.capabilities
+    if not (
+        capabilities.requires_sandbox_cwd
+        or capabilities.filesystem_semantics is FilesystemSemantics.ISOLATED
+    ):
         return None
     return definition
 
@@ -1327,8 +1331,8 @@ def _sanitize_registered_sandbox_cwd(
     *,
     verified_cwd: str | None = None,
 ) -> str:
-    """Keep host cwd values away from every unverified registered backend."""
-    definition = _registered_unverified_backend_definition(env_type)
+    """Normalize cwd values for registered isolated backends."""
+    definition = _registered_sandbox_backend_definition(env_type)
     if definition is None:
         return cwd
     safe_default = definition.default_cwd or "~"
@@ -1337,7 +1341,7 @@ def _sanitize_registered_sandbox_cwd(
     if cwd == "~" or cwd.startswith("~/"):
         return cwd
     logger.info(
-        "Ignoring unverified cwd %r for backend %s; using %r instead.",
+        "Ignoring cwd %r for isolated backend %s; using %r instead.",
         cwd,
         env_type,
         safe_default,
@@ -1379,7 +1383,7 @@ def _get_env_config() -> Dict[str, Any]:
         docker_env = {}
         docker_extra_args = []
 
-    experimental_definition = _registered_unverified_backend_definition(env_type)
+    experimental_definition = _registered_sandbox_backend_definition(env_type)
     registered_sandbox_backend = experimental_definition is not None
 
     # Default cwd: local uses the host's current directory, ssh uses the
@@ -2245,7 +2249,7 @@ def terminal_tool(
         # isolated backends accept only their declared default, remote tilde paths,
         # or a cwd verified by the live backend. Legacy container backends retain
         # their existing host-prefix guard.
-        registered_sandbox_backend = _registered_unverified_backend_definition(env_type)
+        registered_sandbox_backend = _registered_sandbox_backend_definition(env_type)
         if registered_sandbox_backend is not None:
             cwd = _sanitize_registered_sandbox_cwd(env_type, cwd, config["cwd"])
         elif env_type in _CONTAINER_BACKENDS and _is_unusable_container_cwd(cwd):
