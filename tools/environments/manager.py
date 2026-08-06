@@ -56,8 +56,22 @@ class EnvironmentManager:
     def create_environment(self, request: BackendFactoryRequest) -> "BaseEnvironment":
         """Create a new environment for a fully resolved request."""
         from tools.environments.base import BaseEnvironment
+        from tools.environments.builtin_backends import (
+            is_canonical_builtin_definition,
+        )
 
-        definition = self.resolve_backend(request.backend_name)
+        definition = self.registry.require(request.backend_name)
+        # Legacy built-ins historically construct directly and surface the
+        # backend-specific constructor/configuration error. Their separate
+        # check_terminal_requirements() path still performs the preflight.
+        # Third-party definitions retain manager-enforced availability.
+        if (
+            not is_canonical_builtin_definition(definition)
+            and not definition.is_available()
+        ):
+            raise BackendUnavailableError(
+                f"Terminal backend {request.backend_name!r} is unavailable"
+            )
         resolved_config: dict[str, Any] = {}
         if definition.config_resolver is not None:
             plugin_config = definition.config_resolver()
@@ -74,12 +88,13 @@ class EnvironmentManager:
             raise TypeError(
                 f"Terminal backend {definition.name!r} factory must return BaseEnvironment"
             )
-        if definition.capabilities.execution_location is ExecutionLocation.REMOTE:
+        if definition.capabilities.execution_location is not ExecutionLocation.LOCAL:
             from tools.environments.local import LocalEnvironment
 
             if isinstance(environment, LocalEnvironment):
                 raise TypeError(
-                    f"Terminal backend {definition.name!r} declares remote execution "
+                    f"Terminal backend {definition.name!r} declares "
+                    f"{definition.capabilities.execution_location.value} execution "
                     "but returned LocalEnvironment"
                 )
         return environment

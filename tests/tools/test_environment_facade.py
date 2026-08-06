@@ -202,11 +202,10 @@ def test_terminal_factory_uses_registry_local_backend_when_exp_backend_is_one(
         environment.cleanup()
 
 
-def test_terminal_factory_rejects_unregistered_backend_without_legacy_fallback(
+def test_terminal_factory_preserves_unknown_error_without_legacy_runtime_fallback(
     monkeypatch,
 ):
     from tools.environments.facade import reset_environment_facade
-    from tools.environments.registry import BackendNotFoundError
     from tools import terminal_tool
 
     monkeypatch.setenv("EXP_BACKEND", "1")
@@ -217,5 +216,8 @@ def test_terminal_factory_rejects_unregistered_backend_without_legacy_fallback(
         lambda *args, **kwargs: pytest.fail("legacy runtime was called"),
     )
 
-    with pytest.raises(BackendNotFoundError, match="coder"):
+    with pytest.raises(
+        ValueError,
+        match="Unknown environment type: coder.*'local'.*'ssh'",
+    ):
         terminal_tool._create_environment("coder", "", "/workspace", 30)

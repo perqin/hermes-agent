@@ -57,6 +57,24 @@ def test_experimental_config_uses_registered_sandbox_default_cwd(monkeypatch):
     assert config["host_cwd"] is None
 
 
+def test_experimental_config_does_not_trust_plugin_declared_host_default(
+    monkeypatch,
+):
+    from tools.terminal_tool import _get_env_config
+
+    definition = _definition()
+    definition.default_cwd = "/opt/host-only/project"
+    terminal_backend_registry.register(definition)
+    monkeypatch.setenv("EXP_BACKEND", "1")
+    monkeypatch.setenv("TERMINAL_ENV", definition.name)
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+    config = _get_env_config()
+
+    assert config["cwd"] == "~"
+    assert config["host_cwd"] is None
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
@@ -75,6 +93,25 @@ def test_isolated_plugin_rejects_unverified_resolved_cwd(monkeypatch, candidate)
     monkeypatch.setenv("EXP_BACKEND", "1")
 
     assert _sanitize_registered_sandbox_cwd(definition.name, candidate, "~") == "~"
+
+
+def test_isolated_plugin_cannot_treat_caller_host_cwd_as_safe_default(monkeypatch):
+    from tools.terminal_tool import _sanitize_registered_sandbox_cwd
+
+    definition = _definition()
+    definition.default_cwd = "/sandbox"
+    terminal_backend_registry.register(definition)
+    monkeypatch.setenv("EXP_BACKEND", "1")
+
+    host_cwd = "/home/host-user/project"
+    assert (
+        _sanitize_registered_sandbox_cwd(
+            definition.name,
+            host_cwd,
+            host_cwd,
+        )
+        == "~"
+    )
 
 
 def test_plugin_instance_cwd_is_not_host_verified(monkeypatch):
@@ -413,7 +450,7 @@ def test_experimental_local_capability_exposes_host_prompt(monkeypatch):
     assert "Current working directory:" in hint
 
 
-def test_experimental_plugin_runs_live_remote_probe(monkeypatch):
+def test_experimental_plugin_formats_mocked_remote_probe(monkeypatch):
     import agent.prompt_builder as prompt_builder
     from tools.environments.local import LocalEnvironment
 
@@ -430,6 +467,41 @@ def test_experimental_plugin_runs_live_remote_probe(monkeypatch):
     probe.assert_called_once_with(definition.name)
     assert "User: coder" in hint
     assert "Home: /home/coder" in hint
+
+
+@pytest.mark.parametrize(
+    "execution_location",
+    [ExecutionLocation.REMOTE, ExecutionLocation.UNKNOWN],
+)
+def test_nonlocal_plugin_cannot_probe_host_through_local_environment(
+    monkeypatch, tmp_path, execution_location
+):
+    import agent.prompt_builder as prompt_builder
+    from tools.environments.local import LocalEnvironment
+
+    execute_calls = 0
+
+    class _HostProbeEnvironment(LocalEnvironment):
+        def execute(self, *_args, **_kwargs):
+            nonlocal execute_calls
+            execute_calls += 1
+            return {
+                "output": "home=/host-secret-sentinel",
+                "returncode": 0,
+            }
+
+    definition = _definition()
+    definition.capabilities.execution_location = execution_location
+    definition.factory = lambda _request: _HostProbeEnvironment(cwd=str(tmp_path))
+    terminal_backend_registry.register(definition)
+    monkeypatch.setenv("EXP_BACKEND", "1")
+    monkeypatch.setenv("TERMINAL_ENV", definition.name)
+    prompt_builder._clear_backend_probe_cache()
+
+    hint = prompt_builder.build_environment_hints()
+
+    assert execute_calls == 0
+    assert "/host-secret-sentinel" not in hint
 
 
 def test_experimental_host_filesystem_uses_host_path_resolution(monkeypatch):
@@ -477,6 +549,28 @@ def test_experimental_file_paths_follow_isolated_filesystem_semantics(monkeypatc
     )
 
 
+@pytest.mark.parametrize(
+    "backend_name",
+    ["docker", "singularity", "modal", "daytona", "vercel_sandbox", "ssh"],
+)
+def test_experimental_builtin_file_tilde_preserves_legacy_expansion(
+    monkeypatch, backend_name
+):
+    import tools.file_tools as file_tools
+
+    monkeypatch.setenv("EXP_BACKEND", "1")
+    monkeypatch.setenv("TERMINAL_ENV", backend_name)
+    monkeypatch.setattr(
+        file_tools,
+        "_expand_tilde",
+        lambda path: path.replace("~", "/host-home", 1),
+    )
+
+    assert str(file_tools._resolve_path_for_task("~/evidence.txt")) == (
+        "/host-home/evidence.txt"
+    )
+
+
 def test_threaded_process_handle_is_public_plugin_contract():
     from tools.environments import ThreadedProcessHandle
 
@@ -497,12 +591,13 @@ def test_threaded_process_handle_is_public_plugin_contract():
         "vercel_sandbox",
     ],
 )
-def test_plugin_context_rejects_reserved_builtin_backend_names(backend_name):
+@pytest.mark.parametrize("source", ["user", "project", "entrypoint"])
+def test_plugin_context_rejects_reserved_builtin_backend_names(backend_name, source):
     from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
     from tools.environments.registry import BackendAlreadyRegisteredError
 
     context = PluginContext(
-        PluginManifest(name="third-party", source="user"), PluginManager()
+        PluginManifest(name="third-party", source=source), PluginManager()
     )
 
     definition = _definition()
