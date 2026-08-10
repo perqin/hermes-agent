@@ -357,16 +357,21 @@ def _resolve_base_dir(
     if container_paths is None:
         container_paths = _uses_container_paths(task_id)
     if container_paths and os.getenv("EXP_BACKEND") == "1":
+        from tools.environments.builtin_backends import (
+            is_canonical_builtin_definition,
+        )
         from tools.environments.registry import terminal_backend_registry
 
         env_type = _terminal_env_type_for_task(task_id)
         definition = terminal_backend_registry.get(env_type)
-        # Do not consult session overrides, TERMINAL_CWD, os.getcwd(), or host
-        # tilde expansion for a third-party/unknown backend. A registered remote
-        # default is the only safe initial anchor; unknown backends stay relative
-        # and will fail during explicit backend resolution.
-        base_text = definition.default_cwd if definition and definition.default_cwd else "."
-        return _normalize_without_host_deref(base_text)
+        # Third-party/unknown isolated backends must not consume host session
+        # cwd state before the live backend verifies it. Canonical built-ins
+        # retain their legacy task-cwd resolution during registry migration.
+        if definition is None or not is_canonical_builtin_definition(definition):
+            # Plugin-declared absolute defaults cannot establish that a path
+            # belongs to an isolated backend rather than the Hermes host.
+            base_text = "~"
+            return _normalize_without_host_deref(base_text)
 
     root = _authoritative_workspace_root(task_id)
     if root:
@@ -410,9 +415,23 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
     container_paths = _uses_container_paths(task_id)
     if container_paths:
         # Remote tildes belong to the backend; expanding them on the Hermes host
-        # leaks the host home directory into the remote path.
-        expanded = filepath if os.getenv("EXP_BACKEND") == "1" else _expand_tilde(filepath)
-        if os.getenv("EXP_BACKEND") == "1" and (
+        # leaks the host home directory into third-party paths. Canonical
+        # built-ins retain their pre-registry expansion semantics.
+        preserve_remote_tilde = False
+        if os.getenv("EXP_BACKEND") == "1":
+            from tools.environments.builtin_backends import (
+                is_canonical_builtin_definition,
+            )
+            from tools.environments.registry import terminal_backend_registry
+
+            env_type = _terminal_env_type_for_task(task_id)
+            definition = terminal_backend_registry.get(env_type)
+            preserve_remote_tilde = (
+                definition is None
+                or not is_canonical_builtin_definition(definition)
+            )
+        expanded = filepath if preserve_remote_tilde else _expand_tilde(filepath)
+        if preserve_remote_tilde and (
             expanded == "~" or expanded.startswith("~/")
         ):
             return _normalize_without_host_deref(expanded)

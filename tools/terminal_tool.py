@@ -1054,13 +1054,6 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     return command, None
 
 
-# Environment classes now live in tools/environments/
-from tools.environments.local import LocalEnvironment as _LocalEnvironment
-from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
-from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
-from tools.environments.docker import DockerEnvironment as _DockerEnvironment
-from tools.environments.modal import ModalEnvironment as _ModalEnvironment
-from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 import sys
 
@@ -1434,11 +1427,38 @@ def _sanitize_registered_sandbox_cwd(
     definition = _registered_sandbox_backend_definition(env_type)
     if definition is None:
         return cwd
-    safe_default = definition.default_cwd or "~"
-    if cwd == safe_default:
+    from tools.environments.builtin_backends import (
+        is_canonical_builtin_definition,
+    )
+
+    canonical_builtin = is_canonical_builtin_definition(definition)
+    # A plugin-authored default cannot prove that an absolute path belongs to
+    # its isolated filesystem rather than the Hermes host. Only canonical
+    # host-owned definitions may establish a non-tilde sandbox default.
+    declared_default = (
+        definition.default_cwd or "~" if canonical_builtin else "~"
+    )
+    safe_default = default_cwd if canonical_builtin and default_cwd else declared_default
+    if cwd == declared_default:
         return cwd
     if cwd == "~" or cwd.startswith("~/"):
         return cwd
+
+    # Canonical built-ins retain their legacy cwd contract during the registry
+    # migration. SSH-like built-ins use a tilde default and accept absolute
+    # paths on the remote host. Container/cloud built-ins accept arbitrary
+    # absolute sandbox paths while rejecting host-prefixed and relative paths.
+    # Third-party isolated backends stay fail-closed to their declared default.
+    if canonical_builtin:
+        if cwd == safe_default:
+            return cwd
+        if verified_cwd is not None and cwd == verified_cwd:
+            return cwd
+        if definition.default_cwd == "~":
+            return cwd
+        if not _is_unusable_container_cwd(cwd):
+            return cwd
+
     logger.info(
         "Ignoring cwd %r for isolated backend %s; using %r instead.",
         cwd,
@@ -1550,8 +1570,16 @@ def _get_env_config() -> Dict[str, Any]:
         default_cwd = _safe_getcwd()
     elif env_type == "ssh":
         default_cwd = "~"
-    elif registered_sandbox_backend and experimental_definition.default_cwd:
-        default_cwd = experimental_definition.default_cwd
+    elif registered_sandbox_backend:
+        from tools.environments.builtin_backends import (
+            is_canonical_builtin_definition,
+        )
+
+        default_cwd = (
+            experimental_definition.default_cwd or "~"
+            if is_canonical_builtin_definition(experimental_definition)
+            else "~"
+        )
     elif env_type == "vercel_sandbox":
         default_cwd = _VERCEL_SANDBOX_DEFAULT_CWD
     else:
@@ -1671,7 +1699,10 @@ def _create_environment(
 ):
     """Create an environment through the migration facade."""
     from tools.environments.definitions import BackendFactoryRequest
-    from tools.environments.facade import get_environment_facade
+    from tools.environments.facade import (
+        ExperimentalEnvironmentFacade,
+        get_environment_facade,
+    )
 
     request = BackendFactoryRequest(
         backend_name=env_type,
@@ -1700,7 +1731,22 @@ def _create_environment(
             host_cwd=factory_request.host_cwd,
         )
 
-    return get_environment_facade(legacy_factory).create_environment(request)
+    facade = get_environment_facade(legacy_factory)
+    if (
+        os.getenv("EXP_BACKEND") == "1"
+        and isinstance(facade, ExperimentalEnvironmentFacade)
+        and facade.manager.registry.get(env_type) is None
+    ):
+        # The registry API exposes BackendNotFoundError to direct callers, but
+        # this terminal compatibility boundary historically raises ValueError
+        # with the complete actionable built-in list for unknown TERMINAL_ENV
+        # values. Registered backends still always use the manager factory.
+        from tools.environments.builtin_backends import (
+            raise_unknown_builtin_environment,
+        )
+
+        raise_unknown_builtin_environment(env_type)
+    return facade.create_environment(request)
 
 
 def _create_environment_legacy(env_type: str, image: str, cwd: str, timeout: int,
@@ -1725,150 +1771,24 @@ def _create_environment_legacy(env_type: str, image: str, cwd: str, timeout: int
     Returns:
         Environment instance with execute() method
     """
-    cc = container_config or {}
-    cpu = cc.get("container_cpu", 1)
-    memory = cc.get("container_memory", 5120)
-    disk = cc.get("container_disk", 51200)
-    persistent = cc.get("container_persistent", True)
-    volumes = cc.get("docker_volumes", [])
-    docker_forward_env = cc.get("docker_forward_env", [])
-    docker_env = cc.get("docker_env", {})
-    docker_extra_args = cc.get("docker_extra_args", [])
-    docker_network = cc.get("docker_network", True)
+    from tools.environments.builtin_backends import create_builtin_environment
+    from tools.environments.definitions import BackendFactoryRequest
 
-    if env_type == "local":
-        return _LocalEnvironment(cwd=cwd, timeout=timeout)
-    
-    elif env_type == "docker":
-        # One-shot orphan reaper: clean up labeled containers left behind by
-        # prior Hermes processes that hit SIGKILL / OOM / a closed terminal
-        # before the atexit cleanup hook could run.  Gated to once per
-        # process so concurrent _create_environment calls (parallel
-        # subagents, RL benchmarks) don't run the reaper N times.
-        # Disable via ``terminal.docker_orphan_reaper: false`` (issue #20561).
-        _maybe_reap_docker_orphans(cc)
-        return _DockerEnvironment(
-            image=image, cwd=cwd, timeout=timeout,
-            cpu=cpu, memory=memory, disk=disk,
-            persistent_filesystem=persistent, task_id=task_id,
-            volumes=volumes,
-            host_cwd=host_cwd,
-            auto_mount_cwd=cc.get("docker_mount_cwd_to_workspace", False),
-            forward_env=docker_forward_env,
-            env=docker_env,
-            run_as_host_user=cc.get("docker_run_as_host_user", False),
-            network=docker_network,
-            extra_args=docker_extra_args,
-            persist_across_processes=cc.get("docker_persist_across_processes", True),
-            shm_size=cc.get("docker_shm_size", "1g"),
-        )
-    
-    elif env_type == "singularity":
-        return _SingularityEnvironment(
-            image=image, cwd=cwd, timeout=timeout,
-            cpu=cpu, memory=memory, disk=disk,
-            persistent_filesystem=persistent, task_id=task_id,
-        )
-    
-    elif env_type == "modal":
-        sandbox_kwargs = {}
-        if cpu > 0:
-            sandbox_kwargs["cpu"] = cpu
-        if memory > 0:
-            sandbox_kwargs["memory"] = memory
-        if disk > 0:
-            try:
-                import inspect, modal
-                if "ephemeral_disk" in inspect.signature(modal.Sandbox.create).parameters:
-                    sandbox_kwargs["ephemeral_disk"] = disk
-            except Exception:
-                pass
-
-        modal_state = _get_modal_backend_state(cc.get("modal_mode"))
-
-        if modal_state["selected_backend"] == "managed":
-            return _ManagedModalEnvironment(
-                image=image, cwd=cwd, timeout=timeout,
-                modal_sandbox_kwargs=sandbox_kwargs,
-                persistent_filesystem=persistent, task_id=task_id,
-            )
-
-        if modal_state["selected_backend"] != "direct":
-            if modal_state["managed_mode_blocked"]:
-                raise ValueError(
-                    "Modal backend is configured for managed mode, but "
-                    "Nous Tool Gateway access is not currently available and no direct "
-                    "Modal credentials/config were found. "
-                    + nous_tool_gateway_unavailable_message(
-                        "managed Modal execution",
-                    )
-                    + " Choose TERMINAL_MODAL_MODE=direct/auto to use direct Modal credentials."
-                )
-            if modal_state["mode"] == "managed":
-                raise ValueError(
-                    "Modal backend is configured for managed mode, but the managed tool gateway is unavailable. "
-                    + nous_tool_gateway_unavailable_message(
-                        "managed Modal execution",
-                    )
-                )
-            if modal_state["mode"] == "direct":
-                raise ValueError(
-                    "Modal backend is configured for direct mode, but no direct Modal credentials/config were found."
-                )
-            message = "Modal backend selected but no direct Modal credentials/config was found."
-            if managed_nous_tools_enabled():
-                message = (
-                    "Modal backend selected but no direct Modal credentials/config or managed tool gateway was found."
-                )
-            raise ValueError(message)
-
-        return _ModalEnvironment(
-            image=image, cwd=cwd, timeout=timeout,
-            modal_sandbox_kwargs=sandbox_kwargs,
-            persistent_filesystem=persistent, task_id=task_id,
-        )
-    
-    elif env_type == "daytona":
-        # Lazy import so daytona SDK is only required when backend is selected.
-        from tools.environments.daytona import DaytonaEnvironment as _DaytonaEnvironment
-        return _DaytonaEnvironment(
-            image=image, cwd=cwd, timeout=timeout,
-            cpu=int(cpu), memory=memory, disk=disk,
-            persistent_filesystem=persistent, task_id=task_id,
-        )
-
-    elif env_type == "vercel_sandbox":
-        from tools.environments.vercel_sandbox import (
-            VercelSandboxEnvironment as _VercelSandboxEnvironment,
-        )
-        return _VercelSandboxEnvironment(
-            runtime=cc.get("vercel_runtime") or None,
+    return create_builtin_environment(
+        BackendFactoryRequest(
+            backend_name=env_type,
+            image=image,
             cwd=cwd,
             timeout=timeout,
-            cpu=cpu,
-            memory=memory,
-            disk=disk,
-            persistent_filesystem=persistent,
             task_id=task_id,
+            host_cwd=host_cwd,
+            terminal_config={
+                "ssh_config": ssh_config,
+                "container_config": container_config,
+                "local_config": local_config,
+            },
         )
-
-    elif env_type == "ssh":
-        if not ssh_config or not ssh_config.get("host") or not ssh_config.get("user"):
-            raise ValueError("SSH environment requires ssh_host and ssh_user to be configured")
-        return _SSHEnvironment(
-            host=ssh_config["host"],
-            user=ssh_config["user"],
-            port=ssh_config.get("port", 22),
-            key_path=ssh_config.get("key", ""),
-            cwd=cwd,
-            timeout=timeout,
-        )
-
-    else:
-        raise ValueError(
-            f"Unknown environment type: {env_type}. Use 'local', 'docker', "
-            f"'singularity', 'modal', 'daytona', 'vercel_sandbox', or 'ssh'"
-        )
+    )
 
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
@@ -3282,13 +3202,17 @@ def terminal_tool(
         }, ensure_ascii=False)
 
 
-def check_terminal_requirements() -> bool:
-    """Check if all requirements for the terminal tool are met."""
+def _check_terminal_backend_requirements(
+    *,
+    backend_name: str | None = None,
+    skip_registry: bool = False,
+) -> bool:
+    """Check whether the selected or explicitly named terminal backend is usable."""
     try:
         config = _get_env_config()
-        env_type = config["env_type"]
+        env_type = backend_name or config["env_type"]
 
-        if os.getenv("EXP_BACKEND") == "1":
+        if os.getenv("EXP_BACKEND") == "1" and not skip_registry:
             from tools.environments.manager import EnvironmentManager
 
             try:
@@ -3408,6 +3332,11 @@ def check_terminal_requirements() -> bool:
     except Exception as e:
         logger.error("Terminal requirements check failed: %s", e, exc_info=True)
         return False
+
+
+def check_terminal_requirements() -> bool:
+    """Check if all requirements for the selected terminal backend are met."""
+    return _check_terminal_backend_requirements()
 
 
 if __name__ == "__main__":
