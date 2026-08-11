@@ -3155,10 +3155,14 @@ def _check_terminal_backend_requirements(
 
             manager = EnvironmentManager()
             if manager.registry.get(env_type) is None:
+                registered_backends = ", ".join(
+                    definition.name
+                    for definition in manager.registry.list_definitions()
+                )
                 logger.error(
-                    "Unknown TERMINAL_ENV %r. Use one of: local, docker, singularity, "
-                    "modal, daytona, vercel_sandbox, ssh.",
+                    "Unknown TERMINAL_ENV %r. Use one of: %s.",
                     env_type,
+                    registered_backends,
                 )
                 return False
             try:

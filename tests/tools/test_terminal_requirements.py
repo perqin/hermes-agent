@@ -1,5 +1,6 @@
 import importlib
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -78,6 +79,35 @@ def test_unknown_terminal_env_logs_error_and_returns_false(monkeypatch, caplog):
     assert ok is False
     assert any(
         "Unknown TERMINAL_ENV 'unknown-backend'" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_unknown_terminal_env_lists_registered_backends(monkeypatch, caplog):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("TERMINAL_ENV", "unknown-backend")
+
+    class Registry:
+        def get(self, _name):
+            return None
+
+        def list_definitions(self):
+            return (
+                SimpleNamespace(name="local"),
+                SimpleNamespace(name="third_party_remote"),
+            )
+
+    class Manager:
+        registry = Registry()
+
+    monkeypatch.setattr("tools.environments.manager.EnvironmentManager", Manager)
+
+    with caplog.at_level(logging.ERROR):
+        ok = terminal_tool_module.check_terminal_requirements()
+
+    assert ok is False
+    assert any(
+        "Use one of: local, third_party_remote." in record.getMessage()
         for record in caplog.records
     )
 
