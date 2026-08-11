@@ -1399,11 +1399,11 @@ def _is_unusable_container_cwd(cwd: str) -> bool:
 
 def _registered_sandbox_backend_definition(env_type: str):
     """Return a registered backend that declares isolated filesystem semantics."""
-    if os.getenv("EXP_BACKEND") != "1":
-        return None
     from tools.environments.definitions import FilesystemSemantics
+    from tools.environments.builtin_backends import register_builtin_terminal_backends
     from tools.environments.registry import terminal_backend_registry
 
+    register_builtin_terminal_backends(terminal_backend_registry)
     definition = terminal_backend_registry.get(env_type)
     if definition is None:
         return None
@@ -1559,8 +1559,8 @@ def _get_env_config() -> Dict[str, Any]:
         docker_extra_args = []
         docker_shm_size = "1g"
 
-    experimental_definition = _registered_sandbox_backend_definition(env_type)
-    registered_sandbox_backend = experimental_definition is not None
+    backend_definition = _registered_sandbox_backend_definition(env_type)
+    registered_sandbox_backend = backend_definition is not None
 
     # Default cwd: local uses the host's current directory, ssh uses the
     # remote home, registered sandbox backends declare their own default,
@@ -1576,8 +1576,8 @@ def _get_env_config() -> Dict[str, Any]:
         )
 
         default_cwd = (
-            experimental_definition.default_cwd or "~"
-            if is_canonical_builtin_definition(experimental_definition)
+            backend_definition.default_cwd or "~"
+            if is_canonical_builtin_definition(backend_definition)
             else "~"
         )
     elif env_type == "vercel_sandbox":
@@ -1697,12 +1697,9 @@ def _create_environment(
     task_id: str = "default",
     host_cwd: str = None,
 ):
-    """Create an environment through the migration facade."""
+    """Create an environment through the registered backend manager."""
     from tools.environments.definitions import BackendFactoryRequest
-    from tools.environments.facade import (
-        ExperimentalEnvironmentFacade,
-        get_environment_facade,
-    )
+    from tools.environments.manager import EnvironmentManager
 
     request = BackendFactoryRequest(
         backend_name=env_type,
@@ -1718,25 +1715,8 @@ def _create_environment(
         },
     )
 
-    def legacy_factory(factory_request: BackendFactoryRequest):
-        return _create_environment_legacy(
-            factory_request.backend_name,
-            factory_request.image,
-            factory_request.cwd,
-            factory_request.timeout,
-            ssh_config=factory_request.terminal_config.get("ssh_config"),
-            container_config=factory_request.terminal_config.get("container_config"),
-            local_config=factory_request.terminal_config.get("local_config"),
-            task_id=factory_request.task_id,
-            host_cwd=factory_request.host_cwd,
-        )
-
-    facade = get_environment_facade(legacy_factory)
-    if (
-        os.getenv("EXP_BACKEND") == "1"
-        and isinstance(facade, ExperimentalEnvironmentFacade)
-        and facade.manager.registry.get(env_type) is None
-    ):
+    manager = EnvironmentManager()
+    if manager.registry.get(env_type) is None:
         # The registry API exposes BackendNotFoundError to direct callers, but
         # this terminal compatibility boundary historically raises ValueError
         # with the complete actionable built-in list for unknown TERMINAL_ENV
@@ -1746,49 +1726,7 @@ def _create_environment(
         )
 
         raise_unknown_builtin_environment(env_type)
-    return facade.create_environment(request)
-
-
-def _create_environment_legacy(env_type: str, image: str, cwd: str, timeout: int,
-                               ssh_config: dict = None, container_config: dict = None,
-                               local_config: dict = None,
-                               task_id: str = "default",
-                               host_cwd: str = None):
-    """
-    Create an execution environment for sandboxed command execution.
-    
-    Args:
-        env_type: One of "local", "docker", "singularity", "modal",
-            "daytona", "vercel_sandbox", "ssh"
-        image: Docker/Singularity/Modal image name (ignored for local/ssh/vercel)
-        cwd: Working directory
-        timeout: Default command timeout
-        ssh_config: SSH connection config (for env_type="ssh")
-        container_config: Resource config for container backends (cpu, memory, disk, persistent)
-        task_id: Task identifier for environment reuse and snapshot keying
-        host_cwd: Optional host working directory to bind into Docker when explicitly enabled
-        
-    Returns:
-        Environment instance with execute() method
-    """
-    from tools.environments.builtin_backends import create_builtin_environment
-    from tools.environments.definitions import BackendFactoryRequest
-
-    return create_builtin_environment(
-        BackendFactoryRequest(
-            backend_name=env_type,
-            image=image,
-            cwd=cwd,
-            timeout=timeout,
-            task_id=task_id,
-            host_cwd=host_cwd,
-            terminal_config={
-                "ssh_config": ssh_config,
-                "container_config": container_config,
-                "local_config": local_config,
-            },
-        )
-    )
+    return manager.create_environment(request)
 
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
@@ -3212,14 +3150,22 @@ def _check_terminal_backend_requirements(
         config = _get_env_config()
         env_type = backend_name or config["env_type"]
 
-        if os.getenv("EXP_BACKEND") == "1" and not skip_registry:
+        if not skip_registry:
             from tools.environments.manager import EnvironmentManager
 
+            manager = EnvironmentManager()
+            if manager.registry.get(env_type) is None:
+                logger.error(
+                    "Unknown TERMINAL_ENV %r. Use one of: local, docker, singularity, "
+                    "modal, daytona, vercel_sandbox, ssh.",
+                    env_type,
+                )
+                return False
             try:
-                EnvironmentManager().resolve_backend(env_type)
+                manager.resolve_backend(env_type)
             except Exception as exc:
                 logger.error(
-                    "Experimental terminal backend %r is unavailable: %s",
+                    "Terminal backend %r is unavailable: %s",
                     env_type,
                     exc,
                 )

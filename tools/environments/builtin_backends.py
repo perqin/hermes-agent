@@ -238,14 +238,6 @@ def _create_ssh_environment(request: BackendFactoryRequest) -> "BaseEnvironment"
     )
 
 
-def create_builtin_environment(request: BackendFactoryRequest) -> "BaseEnvironment":
-    """Create one user-selectable host-owned backend from a factory request."""
-    definition = _canonical_builtin_definition(request.backend_name)
-    if definition is None:
-        raise_unknown_builtin_environment(request.backend_name)
-    return definition.factory(request)
-
-
 def raise_unknown_builtin_environment(name: str) -> None:
     """Raise the historical terminal error for an unknown environment name."""
     names = tuple(definition.name for definition in _builtin_backend_definitions())
@@ -431,11 +423,6 @@ SELECTABLE_BUILTIN_BACKEND_NAMES = frozenset(
 RESERVED_BUILTIN_BACKEND_NAMES = (
     SELECTABLE_BUILTIN_BACKEND_NAMES | frozenset({"managed_modal"})
 )
-
-
-def _local_backend_definition() -> BackendDefinition:
-    """Backwards-compatible helper retained for existing host tests."""
-    return _builtin_backend_definitions()[0]
 
 
 def register_builtin_terminal_backends(registry: "TerminalBackendRegistry") -> None:

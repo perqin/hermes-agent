@@ -23,7 +23,7 @@ def _clear_terminal_env(monkeypatch):
         "TERMINAL_SSH_USER",
         "TERMINAL_TIMEOUT",
         "TERMINAL_VERCEL_RUNTIME",
-        "EXP_BACKEND",
+
         "MODAL_TOKEN_ID",
         "MODAL_TOKEN_SECRET",
         "VERCEL_OIDC_TOKEN",
@@ -54,17 +54,15 @@ def test_local_terminal_requirements(monkeypatch, caplog):
     assert "Terminal requirements check failed" not in caplog.text
 
 
-def test_registry_runtime_checks_builtin_local_without_recursing(monkeypatch):
+def test_registry_checks_builtin_local_without_recursing(monkeypatch):
     _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", "local")
 
     assert terminal_tool_module.check_terminal_requirements() is True
 
 
-def test_registry_runtime_preserves_builtin_ssh_requirements(monkeypatch):
+def test_registry_preserves_builtin_ssh_requirements(monkeypatch):
     _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
 
     assert terminal_tool_module.check_terminal_requirements() is False

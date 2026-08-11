@@ -974,36 +974,8 @@ WSL_ENVIRONMENT_HINT = (
 )
 
 
-# Non-local terminal backends that run commands (and therefore every file
-# tool: read_file, write_file, patch, search_files) inside a separate
-# container / remote host rather than on the machine where Hermes itself
-# runs. For these backends, host info (Windows/Linux/macOS, $HOME, cwd) is
-# misleading — the agent should only see the machine it can actually touch.
-_REMOTE_TERMINAL_BACKENDS = frozenset({
-    "docker", "singularity", "modal", "daytona", "ssh",
-    "vercel_sandbox", "managed_modal",
-})
-
-
-# Per-backend fallback descriptions — used when the live probe fails.
-# Only states what we know from the backend choice itself (container type,
-# likely OS family). Does NOT invent cwd, user, or $HOME — the agent is
-# told to probe those directly if it needs them.
-_BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
-    "docker": "a Docker container (Linux)",
-    "singularity": "a Singularity container (Linux)",
-    "modal": "a Modal sandbox (Linux)",
-    "managed_modal": "a managed Modal sandbox (Linux)",
-    "daytona": "a Daytona workspace (Linux)",
-    "vercel_sandbox": "a Vercel sandbox (Linux)",
-    "ssh": "a remote host reached over SSH (likely Linux)",
-}
-
-
-def _experimental_backend_definition(backend: str):
-    """Return a registered definition only for the experimental runtime."""
-    if os.getenv("EXP_BACKEND") != "1":
-        return None
+def _backend_definition(backend: str):
+    """Return the host-registered terminal backend definition, if any."""
     from tools.environments.builtin_backends import register_builtin_terminal_backends
     from tools.environments.registry import terminal_backend_registry
 
@@ -1012,26 +984,19 @@ def _experimental_backend_definition(backend: str):
 
 
 def _is_remote_terminal_backend(backend: str) -> bool:
-    if os.getenv("EXP_BACKEND") == "1":
-        definition = _experimental_backend_definition(backend)
-        if definition is None:
-            return True
-        from tools.environments.definitions import ExecutionLocation
+    definition = _backend_definition(backend)
+    if definition is None:
+        return True
+    from tools.environments.definitions import ExecutionLocation
 
-        return (
-            definition.capabilities.execution_location
-            is not ExecutionLocation.LOCAL
-        )
-    return backend in _REMOTE_TERMINAL_BACKENDS
+    return definition.capabilities.execution_location is not ExecutionLocation.LOCAL
 
 
 def _backend_fallback_description(backend: str) -> str:
-    definition = _experimental_backend_definition(backend)
+    definition = _backend_definition(backend)
     if definition is not None and definition.description.strip():
         return definition.description.strip()
-    return _BACKEND_FALLBACK_DESCRIPTIONS.get(
-        backend, f"a {backend} environment (likely Linux)"
-    )
+    return f"a {backend} environment (likely Linux)"
 
 
 # Cache the backend probe result per process so we only pay the probe cost

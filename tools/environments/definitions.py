@@ -34,15 +34,6 @@ class FilesystemSemantics(str, Enum):
     ISOLATED = "isolated"
 
 
-class HostAccess(str, Enum):
-    """Whether an environment may access resources on the Hermes host."""
-
-    UNKNOWN = "unknown"
-    NONE = "none"
-    POSSIBLE = "possible"
-    DIRECT = "direct"
-
-
 @dataclass
 class BackendCapabilities:
     """Backend traits declared at registration time.
@@ -61,36 +52,6 @@ class BackendCapabilities:
     supports_background_processes: bool = False
     supports_file_transfer: bool = False
     supports_persistence: bool = False
-
-
-@dataclass
-class EffectiveBackendCapabilities(BackendCapabilities):
-    """Capabilities resolved by the host for one task request.
-
-    The Environment Manager derives this state from the registered declaration,
-    host configuration, task overrides, and the factory request. Plugin-declared
-    values alone must not reduce approval requirements.
-    """
-
-    host_access: HostAccess = HostAccess.UNKNOWN
-
-
-@dataclass
-class EnvironmentRuntimeState:
-    """Host-observed security-relevant state for an active environment."""
-
-    backend_name: str
-    task_id: str
-    execution_location: ExecutionLocation = ExecutionLocation.UNKNOWN
-    filesystem_semantics: FilesystemSemantics = FilesystemSemantics.UNKNOWN
-    host_access: HostAccess = HostAccess.UNKNOWN
-    isolation_verified_by_host: bool = False
-
-    @property
-    def has_verified_no_host_access(self) -> bool:
-        """Return whether the host verified that this instance has no host access."""
-        return self.isolation_verified_by_host and self.host_access is HostAccess.NONE
-
 
 @dataclass
 class BackendFactoryRequest:

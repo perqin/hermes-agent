@@ -13,17 +13,14 @@ from tools.environments import (
     ExecutionLocation,
     FilesystemSemantics,
 )
-from tools.environments.facade import reset_environment_facade
 from tools.environments.registry import terminal_backend_registry
 
 
 @pytest.fixture(autouse=True)
 def _reset_backend_runtime():
     terminal_backend_registry.reset()
-    reset_environment_facade()
     yield
     terminal_backend_registry.reset()
-    reset_environment_facade()
 
 
 def _definition(*, available: bool = True) -> BackendDefinition:
@@ -41,13 +38,12 @@ def _definition(*, available: bool = True) -> BackendDefinition:
     )
 
 
-def test_experimental_config_uses_registered_sandbox_default_cwd(monkeypatch):
+def test_registered_config_uses_sandbox_default_cwd(monkeypatch):
     from tools.terminal_tool import _get_env_config
 
     definition = _definition()
     definition.default_cwd = "~"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
     monkeypatch.setenv("TERMINAL_CWD", "/opt/host-only/project")
 
@@ -57,7 +53,7 @@ def test_experimental_config_uses_registered_sandbox_default_cwd(monkeypatch):
     assert config["host_cwd"] is None
 
 
-def test_experimental_config_does_not_trust_plugin_declared_host_default(
+def test_registered_config_does_not_trust_plugin_declared_host_default(
     monkeypatch,
 ):
     from tools.terminal_tool import _get_env_config
@@ -65,7 +61,6 @@ def test_experimental_config_does_not_trust_plugin_declared_host_default(
     definition = _definition()
     definition.default_cwd = "/opt/host-only/project"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
 
@@ -90,7 +85,6 @@ def test_isolated_plugin_rejects_unverified_resolved_cwd(monkeypatch, candidate)
     definition = _definition()
     definition.default_cwd = "~"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
 
     assert _sanitize_registered_sandbox_cwd(definition.name, candidate, "~") == "~"
 
@@ -101,7 +95,6 @@ def test_isolated_plugin_cannot_treat_caller_host_cwd_as_safe_default(monkeypatc
     definition = _definition()
     definition.default_cwd = "/sandbox"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
 
     host_cwd = "/home/host-user/project"
     assert (
@@ -120,7 +113,6 @@ def test_plugin_instance_cwd_is_not_host_verified(monkeypatch):
     definition = _definition()
     definition.default_cwd = "~"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
 
     assert (
         _sanitize_registered_sandbox_cwd(
@@ -165,7 +157,6 @@ def test_terminal_uses_declared_filesystem_semantics_for_task_cwd(
     definition.capabilities.accepts_host_cwd = accepts_host_cwd
     terminal_backend_registry.register(definition)
     task_id = "isolated-plugin-task"
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: FakeEnv()})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})
     monkeypatch.setattr(
@@ -210,7 +201,6 @@ def test_execute_code_sanitizes_task_cwd_for_isolated_backend(monkeypatch):
     definition = _definition()
     definition.default_cwd = "~"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
 
     task_id = "isolated-execute-code-task"
@@ -255,7 +245,6 @@ def test_file_tools_sanitize_task_cwd_when_creating_isolated_backend(monkeypatch
     definition = _definition()
     definition.default_cwd = "~"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
 
     task_id = "isolated-file-tools-task"
@@ -317,7 +306,6 @@ def test_background_terminal_passes_sanitized_cwd_to_plugin_local_environment(
     terminal_backend_registry.register(definition)
     task_id = "isolated-plugin-background-task"
     env = CapturingLocalEnvironment(cwd="/opt/host-only/project")
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: env})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})
     monkeypatch.setattr(
@@ -370,37 +358,34 @@ def test_background_terminal_passes_sanitized_cwd_to_plugin_local_environment(
         )
 
 
-def test_experimental_requirements_accept_registered_available_backend(monkeypatch):
+def test_requirements_accept_registered_available_backend(monkeypatch):
     from tools.terminal_tool import check_terminal_requirements
 
     terminal_backend_registry.register(_definition())
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", "third_party_remote")
 
     assert check_terminal_requirements() is True
 
 
-def test_experimental_requirements_reject_registered_unavailable_backend(
+def test_requirements_reject_registered_unavailable_backend(
     monkeypatch, caplog
 ):
     from tools.terminal_tool import check_terminal_requirements
 
     terminal_backend_registry.register(_definition(available=False))
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", "third_party_remote")
 
     assert check_terminal_requirements() is False
     assert (
-        "Experimental terminal backend 'third_party_remote' is unavailable"
+        "Terminal backend 'third_party_remote' is unavailable"
         in caplog.text
     )
 
 
-def test_experimental_remote_capability_suppresses_host_prompt(monkeypatch):
+def test_remote_capability_suppresses_host_prompt(monkeypatch):
     import agent.prompt_builder as prompt_builder
 
     terminal_backend_registry.register(_definition())
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", "third_party_remote")
     monkeypatch.setattr(prompt_builder, "is_wsl", lambda: False)
     monkeypatch.setattr(prompt_builder, "_probe_remote_backend", lambda _name: None)
@@ -414,13 +399,12 @@ def test_experimental_remote_capability_suppresses_host_prompt(monkeypatch):
     assert "third-party remote workspace" in hint
 
 
-def test_experimental_unknown_location_suppresses_host_prompt(monkeypatch):
+def test_unknown_location_suppresses_host_prompt(monkeypatch):
     import agent.prompt_builder as prompt_builder
 
     definition = _definition()
     definition.capabilities.execution_location = ExecutionLocation.UNKNOWN
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
     monkeypatch.setattr(prompt_builder, "_probe_remote_backend", lambda _name: None)
     prompt_builder._clear_backend_probe_cache()
@@ -431,14 +415,13 @@ def test_experimental_unknown_location_suppresses_host_prompt(monkeypatch):
     assert "Current working directory:" not in hint
 
 
-def test_experimental_local_capability_exposes_host_prompt(monkeypatch):
+def test_local_capability_exposes_host_prompt(monkeypatch):
     import agent.prompt_builder as prompt_builder
 
     definition = _definition()
     definition.capabilities.execution_location = ExecutionLocation.LOCAL
     definition.capabilities.filesystem_semantics = FilesystemSemantics.HOST
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
     monkeypatch.setattr(prompt_builder, "_probe_remote_backend", lambda _name: None)
     prompt_builder._clear_backend_probe_cache()
@@ -450,14 +433,13 @@ def test_experimental_local_capability_exposes_host_prompt(monkeypatch):
     assert "Current working directory:" in hint
 
 
-def test_experimental_plugin_formats_mocked_remote_probe(monkeypatch):
+def test_plugin_formats_mocked_remote_probe(monkeypatch):
     import agent.prompt_builder as prompt_builder
     from tools.environments.local import LocalEnvironment
 
     definition = _definition()
     definition.factory = lambda _request: LocalEnvironment(cwd="/home/coder")
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
     probe = MagicMock(return_value="OS: Linux\nUser: coder\nHome: /home/coder")
     monkeypatch.setattr(prompt_builder, "_probe_remote_backend", probe)
@@ -494,7 +476,6 @@ def test_nonlocal_plugin_cannot_probe_host_through_local_environment(
     definition.capabilities.execution_location = execution_location
     definition.factory = lambda _request: _HostProbeEnvironment(cwd=str(tmp_path))
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
     prompt_builder._clear_backend_probe_cache()
 
@@ -504,20 +485,19 @@ def test_nonlocal_plugin_cannot_probe_host_through_local_environment(
     assert "/host-secret-sentinel" not in hint
 
 
-def test_experimental_host_filesystem_uses_host_path_resolution(monkeypatch):
+def test_host_filesystem_uses_host_path_resolution(monkeypatch):
     from tools.file_tools import _uses_container_paths
 
     definition = _definition()
     definition.capabilities.execution_location = ExecutionLocation.LOCAL
     definition.capabilities.filesystem_semantics = FilesystemSemantics.HOST
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
 
     assert _uses_container_paths() is False
 
 
-def test_experimental_file_paths_follow_isolated_filesystem_semantics(monkeypatch):
+def test_file_paths_follow_isolated_filesystem_semantics(monkeypatch):
     import tools.terminal_tool as terminal_tool
     from tools.environments.local import LocalEnvironment
     from tools.file_tools import (
@@ -529,7 +509,6 @@ def test_experimental_file_paths_follow_isolated_filesystem_semantics(monkeypatc
     definition = _definition()
     definition.default_cwd = "~"
     terminal_backend_registry.register(definition)
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", definition.name)
     monkeypatch.setenv("TERMINAL_CWD", "/opt/host-only/project")
     monkeypatch.setattr(
@@ -553,12 +532,11 @@ def test_experimental_file_paths_follow_isolated_filesystem_semantics(monkeypatc
     "backend_name",
     ["docker", "singularity", "modal", "daytona", "vercel_sandbox", "ssh"],
 )
-def test_experimental_builtin_file_tilde_preserves_legacy_expansion(
+def test_builtin_file_tilde_preserves_existing_expansion(
     monkeypatch, backend_name
 ):
     import tools.file_tools as file_tools
 
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("TERMINAL_ENV", backend_name)
     monkeypatch.setattr(
         file_tools,
@@ -610,12 +588,11 @@ def test_plugin_context_rejects_reserved_builtin_backend_names(backend_name, sou
     "backend_name",
     ["docker", "modal", "singularity", "daytona", "ssh", "vercel_sandbox"],
 )
-def test_experimental_preserves_legacy_container_guard_behavior(
+def test_registered_backend_preserves_container_guard_behavior(
     monkeypatch, backend_name
 ):
     from tools.approval import check_dangerous_command
 
-    monkeypatch.setenv("EXP_BACKEND", "1")
 
     result = check_dangerous_command("rm -rf /", backend_name, has_host_access=True)
 
@@ -628,12 +605,11 @@ def test_experimental_preserves_legacy_container_guard_behavior(
     "backend_name",
     ["docker", "modal", "singularity", "daytona", "ssh", "vercel_sandbox"],
 )
-def test_experimental_preserves_legacy_execute_code_guard_behavior(
+def test_registered_backend_preserves_execute_code_guard_behavior(
     monkeypatch, backend_name
 ):
     import tools.approval as approval
 
-    monkeypatch.setenv("EXP_BACKEND", "1")
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
     monkeypatch.setattr(approval, "_get_cron_approval_mode", lambda: "deny")
 

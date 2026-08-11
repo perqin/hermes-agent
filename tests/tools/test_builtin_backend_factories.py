@@ -52,26 +52,21 @@ def _create_via_manager(request: BackendFactoryRequest) -> BaseEnvironment:
 
 
 def test_terminal_factory_unknown_backend_preserves_legacy_error_contract():
-    from tools.environments.facade import reset_environment_facade
     from tools.terminal_tool import _create_environment
 
-    reset_environment_facade()
-    try:
-        with pytest.raises(
-            ValueError,
-            match=(
-                "Unknown environment type: bogus.*'local'.*'docker'.*"
-                "'singularity'.*'modal'.*'daytona'.*'vercel_sandbox'.*'ssh'"
-            ),
-        ):
-            _create_environment(
-                "bogus",
-                image="",
-                cwd="~",
-                timeout=180,
-            )
-    finally:
-        reset_environment_facade()
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Unknown environment type: bogus.*'local'.*'docker'.*"
+            "'singularity'.*'modal'.*'daytona'.*'vercel_sandbox'.*'ssh'"
+        ),
+    ):
+        _create_environment(
+            "bogus",
+            image="",
+            cwd="~",
+            timeout=180,
+        )
 
 
 def test_docker_factory_preserves_every_legacy_constructor_option(monkeypatch):
