@@ -41,6 +41,21 @@ class TerminalBackendRegistry:
                 )
             self._definitions[definition.name] = definition
 
+    def register_or_verify(self, definition: BackendDefinition) -> None:
+        """Atomically register a definition or accept an exact existing match."""
+        if not isinstance(definition, BackendDefinition):
+            raise TypeError("registry entries must be BackendDefinition instances")
+        with self._lock:
+            existing = self._definitions.get(definition.name)
+            if existing is None:
+                self._definitions[definition.name] = definition
+                return
+            if existing != definition:
+                raise BackendAlreadyRegisteredError(
+                    f"Terminal backend {definition.name!r} conflicts with the "
+                    "registered definition"
+                )
+
     def get(self, name: str) -> BackendDefinition | None:
         """Return a definition by name, or None when it is absent."""
         with self._lock:

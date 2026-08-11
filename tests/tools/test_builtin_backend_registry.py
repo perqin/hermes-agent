@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import fields, replace
+from threading import Barrier, Thread
 
 import pytest
 
@@ -96,6 +97,41 @@ def test_builtin_registration_is_idempotent(registry, name):
     register_builtin_terminal_backends(registry)
 
     assert registry.require(name) == original
+
+
+def test_concurrent_builtin_registration_is_atomic(monkeypatch):
+    from tools.environments.builtin_backends import register_builtin_terminal_backends
+
+    registry = TerminalBackendRegistry()
+    original_get = registry.get
+    first_lookup = Barrier(2)
+
+    def synchronized_get(name):
+        definition = original_get(name)
+        if name == "local":
+            first_lookup.wait(timeout=5)
+        return definition
+
+    monkeypatch.setattr(registry, "get", synchronized_get)
+    errors = []
+
+    def bootstrap():
+        try:
+            register_builtin_terminal_backends(registry)
+        except Exception as exc:  # pragma: no branch - assertion captures the failure
+            errors.append(exc)
+
+    threads = [Thread(target=bootstrap), Thread(target=bootstrap)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert {definition.name for definition in registry.list_definitions()} == (
+        _SELECTABLE_BUILTINS
+    )
 
 
 @pytest.mark.parametrize("canonical", _builtin_backend_definitions(), ids=lambda d: d.name)

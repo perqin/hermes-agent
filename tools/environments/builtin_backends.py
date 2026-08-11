@@ -430,12 +430,10 @@ def register_builtin_terminal_backends(registry: "TerminalBackendRegistry") -> N
     from tools.environments.registry import BackendAlreadyRegisteredError
 
     for canonical in _builtin_backend_definitions():
-        existing = registry.get(canonical.name)
-        if existing is None:
-            registry.register(canonical)
-            continue
-        if existing != canonical:
+        try:
+            registry.register_or_verify(canonical)
+        except BackendAlreadyRegisteredError:
             raise BackendAlreadyRegisteredError(
                 f"Terminal backend {canonical.name!r} conflicts with the canonical "
                 "built-in definition"
-            )
+            ) from None
