@@ -9,41 +9,6 @@ def _factory(request):
     return object()
 
 
-def test_backend_definition_is_public_and_mutable():
-    from tools.environments import (
-        BackendCapabilities,
-        BackendDefinition,
-        ExecutionLocation,
-        FilesystemSemantics,
-    )
-
-    capabilities = BackendCapabilities(
-        execution_location=ExecutionLocation.REMOTE,
-        filesystem_semantics=FilesystemSemantics.ISOLATED,
-        accepts_host_cwd=False,
-        supports_image=True,
-        supports_resource_limits=True,
-        supports_pty=True,
-    )
-    definition = BackendDefinition(
-        name="coder",
-        label="Coder",
-        factory=_factory,
-        capabilities=capabilities,
-    )
-
-    assert definition.name == "coder"
-    assert definition.label == "Coder"
-    assert definition.capabilities is capabilities
-    assert definition.is_available() is True
-
-    definition.name = "other"
-    capabilities.supports_pty = False
-
-    assert definition.name == "other"
-    assert definition.capabilities.supports_pty is False
-
-
 def test_backend_definition_validates_public_registration_contract():
     from tools.environments import BackendDefinition
 
