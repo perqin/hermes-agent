@@ -2781,6 +2781,94 @@ class TestNewEndpoints:
         assert coder["description"] == "Run commands in Coder."
         assert coder["status"] == "ready"
 
+    def test_terminal_backend_picker_accepts_profile_config_when_env_probe_fails(
+        self, monkeypatch
+    ):
+        import hermes_cli.web_server as web_server
+        from tools.environments import BackendDefinition
+        from tools.environments import registry as registry_module
+
+        registry = registry_module.TerminalBackendRegistry()
+        registry.register(
+            BackendDefinition(
+                name="coder",
+                factory=lambda request: object(),
+                availability_check=lambda: False,
+                config_resolver=lambda raw: {**raw, "api_key": "secret-token"},
+                config_availability_check=lambda config: all(
+                    config.get(key)
+                    for key in ("base_url", "api_key", "workspace_name")
+                ),
+                install_hint="Configure Coder.",
+            )
+        )
+        monkeypatch.setattr(registry_module, "terminal_backend_registry", registry)
+
+        assert web_server._probe_terminal_backend(
+            "coder",
+            {
+                "backends": {
+                    "coder": {
+                        "base_url": "https://coder.example",
+                        "workspace_name": "configured-workspace",
+                    }
+                }
+            },
+        ) == ("ready", "")
+
+    def test_terminal_backend_picker_preserves_needs_setup_for_unresolved_config(
+        self, monkeypatch
+    ):
+        import hermes_cli.web_server as web_server
+        from tools.environments import BackendDefinition
+        from tools.environments import registry as registry_module
+
+        registry = registry_module.TerminalBackendRegistry()
+        registry.register(
+            BackendDefinition(
+                name="coder",
+                factory=lambda request: object(),
+                availability_check=lambda: False,
+                config_resolver=lambda raw: dict(raw),
+                config_availability_check=lambda config: False,
+                install_hint="Configure Coder.",
+            )
+        )
+        monkeypatch.setattr(registry_module, "terminal_backend_registry", registry)
+
+        assert web_server._probe_terminal_backend("coder", {"backends": {}}) == (
+            "needs_setup",
+            "Configure Coder.",
+        )
+
+    def test_terminal_backend_picker_does_not_expose_resolver_exception_text(
+        self, monkeypatch
+    ):
+        import hermes_cli.web_server as web_server
+        from tools.environments import BackendDefinition
+        from tools.environments import registry as registry_module
+
+        credential = "synthetic-secret-never-return"
+        registry = registry_module.TerminalBackendRegistry()
+
+        def fail_resolution(_raw):
+            raise ValueError(f"invalid api_key {credential}")
+
+        registry.register(
+            BackendDefinition(
+                name="coder",
+                factory=lambda request: object(),
+                config_resolver=fail_resolution,
+            )
+        )
+        monkeypatch.setattr(registry_module, "terminal_backend_registry", registry)
+
+        status, detail = web_server._probe_terminal_backend("coder", {})
+
+        assert status == "unavailable"
+        assert detail == "Backend probe failed."
+        assert credential not in detail
+
     def test_terminal_backend_picker_revalidates_mutated_metadata(self, monkeypatch):
         import hermes_cli.web_server as web_server
         from tools.environments import BackendDefinition

@@ -1570,6 +1570,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 local_config=local_config,
                 task_id=task_id,
                 host_cwd=_resolve_task_host_cwd(config, raw_task_id),
+                backend_config=config.get("backend_config", {}),
             )
 
             with _env_lock:

@@ -56,7 +56,11 @@ class BackendCapabilities:
 
 @dataclass
 class BackendFactoryRequest:
-    """Host-owned inputs passed to a backend factory."""
+    """Host-owned inputs passed to a backend factory.
+
+    ``backend_config`` contains raw profile config before manager resolution and
+    the resolver's defensive result by the time the backend factory receives it.
+    """
 
     backend_name: str
     task_id: str = "default"
@@ -78,6 +82,8 @@ class BackendFactoryRequest:
 
 BackendFactory = Callable[[BackendFactoryRequest], "BaseEnvironment"]
 AvailabilityCheck = Callable[[], bool]
+ConfigAvailabilityCheck = Callable[[Mapping[str, Any]], bool]
+ConfigResolver = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
 def _always_available() -> bool:
@@ -169,6 +175,12 @@ class BackendDefinition:
     alias another key within that same namespace; only a canonical built-in may
     use it to preserve an existing legacy config path. The dashboard strips the
     routing key before returning the schema.
+
+    ``config_resolver`` receives a defensive snapshot of that backend-local raw
+    profile mapping and returns the complete runtime config. The backend owns
+    precedence among defaults, profile values, and environment overrides. Core
+    uses the returned snapshot for both config-aware availability and factory
+    construction; factories must not read profile config or environment again.
     """
 
     name: str
@@ -183,7 +195,8 @@ class BackendDefinition:
     source: str = ""
     plugin_name: str = ""
     default_cwd: str = ""
-    config_resolver: Callable[[], Mapping[str, Any]] | None = None
+    config_resolver: ConfigResolver | None = None
+    config_availability_check: ConfigAvailabilityCheck | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _BACKEND_NAME_RE.fullmatch(self.name):
@@ -194,6 +207,10 @@ class BackendDefinition:
             raise TypeError("backend default_cwd must be a string")
         if not callable(self.availability_check):
             raise TypeError("availability_check must be callable")
+        if self.config_availability_check is not None and not callable(
+            self.config_availability_check
+        ):
+            raise TypeError("config_availability_check must be callable")
         if self.config_resolver is not None and not callable(self.config_resolver):
             raise TypeError("config_resolver must be callable")
         self.config_schema = _validated_config_schema(self.config_schema)
@@ -214,8 +231,12 @@ class BackendDefinition:
                 raise TypeError(f"backend {field_name} must be a string")
         return metadata
 
-    def is_available(self) -> bool:
+    def is_available(
+        self, backend_config: Mapping[str, Any] | None = None
+    ) -> bool:
         """Return whether the backend can be constructed in this process."""
+        if backend_config is not None and self.config_availability_check is not None:
+            return bool(self.config_availability_check(dict(backend_config)))
         return bool(self.availability_check())
 
     def validated_config_schema(self) -> dict[str, dict[str, Any]]:

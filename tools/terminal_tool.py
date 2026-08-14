@@ -1633,6 +1633,25 @@ def _ensure_terminal_env_bridged() -> None:
         logger.debug("terminal config → env fallback bridge failed", exc_info=True)
 
 
+def _backend_config_from_raw_config(backend_name: str) -> dict[str, Any]:
+    """Return profile-owned ``terminal.backends.<name>`` configuration."""
+    from hermes_cli.config import read_raw_config
+
+    raw_config = read_raw_config()
+    terminal_config = raw_config.get("terminal")
+    if not isinstance(terminal_config, dict):
+        return {}
+    backends = terminal_config.get("backends")
+    if not isinstance(backends, dict):
+        return {}
+    backend_config = backends.get(backend_name)
+    if backend_config is None:
+        return {}
+    if not isinstance(backend_config, dict):
+        raise TypeError(f"terminal.backends.{backend_name} must be a mapping")
+    return dict(backend_config)
+
+
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
@@ -1734,6 +1753,7 @@ def _get_env_config() -> Dict[str, Any]:
 
     return {
         "env_type": env_type,
+        "backend_config": _backend_config_from_raw_config(env_type),
         "modal_mode": coerce_modal_mode(os.getenv("TERMINAL_MODAL_MODE", "auto")),
         "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
         "docker_forward_env": docker_forward_env,
@@ -1851,6 +1871,7 @@ def _create_environment(
     local_config: dict = None,
     task_id: str = "default",
     host_cwd: str = None,
+    backend_config: dict = None,
 ):
     """Create an environment through the registered backend manager."""
     from tools.environments.definitions import BackendFactoryRequest
@@ -1868,6 +1889,7 @@ def _create_environment(
             "container_config": container_config,
             "local_config": local_config,
         },
+        backend_config=backend_config or {},
     )
 
 
@@ -2057,6 +2079,7 @@ def ensure_task_env(task_id: Optional[str] = None):
                 local_config=None,
                 task_id=effective_task_id,
                 host_cwd=_resolve_task_host_cwd(config, task_id),
+                backend_config=config.get("backend_config", {}),
             )
         except Exception as exc:  # noqa: BLE001 — best-effort bring-up
             logger.warning(
@@ -2685,6 +2708,7 @@ def terminal_tool(
                             local_config=local_config,
                             task_id=effective_task_id,
                             host_cwd=host_cwd,
+                            backend_config=config.get("backend_config", {}),
                         )
                     except ImportError as e:
                         return json.dumps({
@@ -3544,7 +3568,10 @@ def _check_terminal_backend_requirements(
                 )
                 return False
             try:
-                manager.resolve_backend(env_type)
+                manager.resolve_backend(
+                    env_type,
+                    backend_config=config.get("backend_config", {}),
+                )
             except Exception as exc:
                 logger.error(
                     "Terminal backend %r is unavailable: %s",

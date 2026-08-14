@@ -877,6 +877,7 @@ def _get_or_create_env(task_id: str):
             local_config=local_config,
             task_id=effective_task_id,
             host_cwd=_resolve_task_host_cwd(config, task_id),
+            backend_config=config.get("backend_config", {}),
         )
 
         with _env_lock:

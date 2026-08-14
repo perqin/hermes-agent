@@ -14386,14 +14386,35 @@ def _probe_terminal_backend(name: str, terminal_cfg: dict) -> tuple:
             return _probe_modal_backend()
         if name == "daytona":
             return _probe_daytona_backend()
-        if definition.is_available():
-            return ("ready", "")
-        return (
-            "needs_setup",
-            metadata["install_hint"] or f"Backend {name!r} is not available.",
+        configured_backends = terminal_cfg.get("backends")
+        configured_backend = (
+            configured_backends.get(name)
+            if isinstance(configured_backends, dict)
+            else None
         )
-    except Exception as exc:  # pragma: no cover — belt-and-braces guard
-        return ("unavailable", f"Probe failed: {exc}")
+        from tools.environments.manager import EnvironmentManager
+        from tools.environments.registry import BackendUnavailableError
+
+        try:
+            EnvironmentManager(
+                registry_module.current_terminal_backend_registry()
+            ).resolve_backend(
+                name,
+                backend_config=(
+                    configured_backend if isinstance(configured_backend, dict) else {}
+                ),
+            )
+        except BackendUnavailableError:
+            return (
+                "needs_setup",
+                metadata["install_hint"] or f"Backend {name!r} is not available.",
+            )
+        return ("ready", "")
+    except Exception:  # pragma: no cover — belt-and-braces guard
+        # Resolver/factory exceptions may embed credentials from resolved config.
+        # Keep this client-visible boundary generic rather than trying to infer
+        # which arbitrary plugin exception fields are safe to serialize.
+        return ("unavailable", "Backend probe failed.")
 
 
 

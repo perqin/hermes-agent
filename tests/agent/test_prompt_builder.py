@@ -830,18 +830,32 @@ class TestEnvironmentHints:
                 }
 
         created = {}
+        backend_config = {"workspace_name": "prompt-probe-workspace"}
 
         def _fake_create_environment(*, env_type, **kwargs):
             created["env_type"] = env_type
+            created["backend_config"] = kwargs.get("backend_config")
             return _FakeEnv()
 
         # Patch the REAL factory in tools.terminal_tool — the probe imports it
         # locally, so the import itself must succeed (the bug was here).
         import tools.terminal_tool as _tt
         monkeypatch.setattr(_tt, "_create_environment", _fake_create_environment)
+        monkeypatch.setattr(
+            _tt,
+            "_get_env_config",
+            lambda: {
+                "env_type": "docker",
+                "cwd": "/workspace",
+                "timeout": 180,
+                "host_cwd": None,
+                "backend_config": backend_config,
+            },
+        )
 
         line = _pb._probe_remote_backend("docker")
         assert created.get("env_type") == "docker"
+        assert created.get("backend_config") == backend_config
         assert line is not None
         assert "Linux 6.8.0" in line
         assert "root" in line

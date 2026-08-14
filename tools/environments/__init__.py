@@ -17,6 +17,8 @@ from tools.environments.definitions import (
     BackendDefinition,
     BackendFactory,
     BackendFactoryRequest,
+    ConfigAvailabilityCheck,
+    ConfigResolver,
     ExecutionLocation,
     FilesystemSemantics,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "BackendDefinition",
     "BackendFactory",
     "BackendFactoryRequest",
+    "ConfigAvailabilityCheck",
+    "ConfigResolver",
     "BaseEnvironment",
     "ExecutionLocation",
     "FilesystemSemantics",

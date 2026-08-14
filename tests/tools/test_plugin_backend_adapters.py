@@ -221,6 +221,7 @@ def test_execute_code_sanitizes_task_cwd_for_isolated_backend(monkeypatch):
             "cwd": "~",
             "host_cwd": None,
             "timeout": 60,
+            "backend_config": {"workspace_name": "execute-code-workspace"},
         },
     )
 
@@ -236,6 +237,9 @@ def test_execute_code_sanitizes_task_cwd_for_isolated_backend(monkeypatch):
     assert resolved_environment is environment
     assert env_type == definition.name
     assert received["cwd"] == "~"
+    assert received["backend_config"] == {
+        "workspace_name": "execute-code-workspace"
+    }
 
 
 def test_file_tools_sanitize_task_cwd_when_creating_isolated_backend(monkeypatch):
@@ -269,6 +273,7 @@ def test_file_tools_sanitize_task_cwd_when_creating_isolated_backend(monkeypatch
             "cwd": "~",
             "host_cwd": None,
             "timeout": 60,
+            "backend_config": {"workspace_name": "file-tools-workspace"},
         },
     )
 
@@ -282,6 +287,9 @@ def test_file_tools_sanitize_task_cwd_when_creating_isolated_backend(monkeypatch
     file_tools._get_file_ops(task_id)
 
     assert received["cwd"] == "~"
+    assert received["backend_config"] == {
+        "workspace_name": "file-tools-workspace"
+    }
 
 
 def test_background_terminal_passes_sanitized_cwd_to_plugin_local_environment(
@@ -752,7 +760,8 @@ def test_manager_resolves_plugin_config_before_calling_factory():
 
     definition = _definition()
     definition.factory = factory
-    definition.config_resolver = lambda: {
+    definition.config_resolver = lambda raw: {
+        **raw,
         "url": "https://coder.example",
         "workspace": "from-environment",
     }
@@ -767,7 +776,235 @@ def test_manager_resolves_plugin_config_before_calling_factory():
 
     assert received == {
         "url": "https://coder.example",
-        "workspace": "explicit-override",
+        "workspace": "from-environment",
+    }
+
+
+def test_manager_config_resolver_receives_defensive_raw_snapshot():
+    from tools.environments.manager import EnvironmentManager
+
+    raw_config = {
+        "workspace": "from-yaml",
+        "forward_env": ["GITHUB_TOKEN"],
+        "nested": {"mode": "yaml"},
+    }
+    definition = _definition()
+
+    def resolver(raw):
+        raw["workspace"] = "from-environment"
+        raw["forward_env"].append("SHELL")
+        raw["nested"]["mode"] = "resolver"
+        return raw
+
+    definition.config_resolver = resolver
+
+    assert EnvironmentManager.resolve_backend_config(definition, raw_config) == {
+        "workspace": "from-environment",
+        "forward_env": ["GITHUB_TOKEN", "SHELL"],
+        "nested": {"mode": "resolver"},
+    }
+    assert raw_config == {
+        "workspace": "from-yaml",
+        "forward_env": ["GITHUB_TOKEN"],
+        "nested": {"mode": "yaml"},
+    }
+
+
+def test_manager_without_config_resolver_copies_raw_backend_config():
+    from tools.environments.manager import EnvironmentManager
+
+    raw_config = {
+        "workspace": "from-yaml",
+        "forward_env": ["GITHUB_TOKEN"],
+        "nested": {"mode": "yaml"},
+    }
+    resolved = EnvironmentManager.resolve_backend_config(_definition(), raw_config)
+
+    assert resolved == raw_config
+    assert resolved is not raw_config
+    resolved["forward_env"].append("SHELL")
+    resolved["nested"]["mode"] = "resolved"
+    assert raw_config["forward_env"] == ["GITHUB_TOKEN"]
+    assert raw_config["nested"] == {"mode": "yaml"}
+
+
+def test_terminal_backend_config_reads_selected_profile_namespace(monkeypatch):
+    import hermes_cli.config as config_module
+    import tools.terminal_tool as terminal_tool
+
+    monkeypatch.setattr(
+        config_module,
+        "read_raw_config",
+        lambda: {
+            "terminal": {
+                "backends": {
+                    "coder": {
+                        "base_url": "https://coder.example",
+                        "workspace_name": "configured-workspace",
+                        "forward_env": ["GITHUB_TOKEN"],
+                        "workspace_startup_timeout": 500,
+                    }
+                }
+            }
+        },
+    )
+
+    assert terminal_tool._backend_config_from_raw_config("coder") == {
+        "base_url": "https://coder.example",
+        "workspace_name": "configured-workspace",
+        "forward_env": ["GITHUB_TOKEN"],
+        "workspace_startup_timeout": 500,
+    }
+
+
+def test_terminal_first_use_forwards_profile_backend_config(monkeypatch):
+    import tools.terminal_tool as terminal_tool
+
+    task_id = "configured-plugin-terminal-task"
+    received: dict[str, object] = {}
+
+    class FakeEnv:
+        cwd = "~"
+        env = {}
+
+        def execute(self, _command, **_kwargs):
+            return {"output": "ok", "returncode": 0}
+
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
+    monkeypatch.setattr(terminal_tool, "_last_activity", {})
+    monkeypatch.setattr(terminal_tool, "_creation_locks", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_env_config",
+        lambda: {
+            "env_type": "coder",
+            "cwd": "~",
+            "host_cwd": None,
+            "timeout": 60,
+            "lifetime_seconds": 3600,
+            "backend_config": {"workspace_name": "terminal-workspace"},
+        },
+    )
+    monkeypatch.setattr(
+        terminal_tool,
+        "_check_all_guards",
+        lambda command, env_type, **kwargs: {"approved": True},
+    )
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+
+    def create_environment(**kwargs):
+        received.update(kwargs)
+        return FakeEnv()
+
+    monkeypatch.setattr(terminal_tool, "_create_environment", create_environment)
+
+    result = json.loads(terminal_tool.terminal_tool(command="pwd", task_id=task_id))
+
+    assert result["exit_code"] == 0
+    assert received["backend_config"] == {
+        "workspace_name": "terminal-workspace"
+    }
+
+
+def test_terminal_preflight_keeps_explicitly_configured_plugin_tools(monkeypatch):
+    import tools.terminal_tool as terminal_tool
+
+    definition = _definition()
+    definition.availability_check = lambda: False
+    definition.config_resolver = lambda raw: {**raw, "api_key": "secret-token"}
+    definition.config_availability_check = lambda config: all(
+        config.get(key) for key in ("base_url", "api_key", "workspace_name")
+    )
+    terminal_backend_registry.register(definition)
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_env_config",
+        lambda: {
+            "env_type": definition.name,
+            "backend_config": {
+                "base_url": "https://coder.example",
+                "workspace_name": "configured-workspace",
+            },
+        },
+    )
+
+    assert terminal_tool.check_terminal_requirements() is True
+
+
+def test_create_environment_forwards_profile_backend_config(monkeypatch):
+    import tools.environments.manager as manager_module
+    import tools.terminal_tool as terminal_tool
+
+    captured: dict[str, object] = {}
+    environment = MagicMock()
+
+    class _Registry:
+        @staticmethod
+        def get(_name):
+            return object()
+
+    class _Manager:
+        registry = _Registry()
+
+        @staticmethod
+        def create_environment(request):
+            captured["request"] = request
+            return environment
+
+    monkeypatch.setattr(manager_module, "EnvironmentManager", _Manager)
+
+    result = terminal_tool._create_environment(
+        env_type="coder",
+        image="",
+        cwd="~",
+        timeout=180,
+        backend_config={
+            "base_url": "https://coder.example",
+            "workspace_name": "configured-workspace",
+        },
+    )
+
+    assert result is environment
+    request = captured["request"]
+    assert isinstance(request, BackendFactoryRequest)
+    assert request.backend_config == {
+        "base_url": "https://coder.example",
+        "workspace_name": "configured-workspace",
+    }
+
+
+def test_manager_accepts_explicit_config_for_env_unavailable_plugin():
+    from tools.environments.manager import EnvironmentManager
+
+    received: dict[str, object] = {}
+
+    def factory(request: BackendFactoryRequest):
+        received.update(request.backend_config)
+        return MagicMock(spec=BaseEnvironment)
+
+    definition = _definition()
+    definition.factory = factory
+    definition.availability_check = lambda: False
+    definition.config_availability_check = lambda config: bool(config)
+    definition.config_resolver = lambda raw: {**raw, "api_key": "secret-token"}
+    terminal_backend_registry.register(definition)
+
+    EnvironmentManager().create_environment(
+        BackendFactoryRequest(
+            backend_name=definition.name,
+            backend_config={
+                "url": "https://coder.example",
+                "workspace": "configured-workspace",
+            },
+        )
+    )
+
+    assert received == {
+        "api_key": "secret-token",
+        "url": "https://coder.example",
+        "workspace": "configured-workspace",
     }
 
 
@@ -877,7 +1114,7 @@ def test_manager_rejects_non_mapping_plugin_config():
     from tools.environments.manager import EnvironmentManager
 
     definition = _definition()
-    definition.config_resolver = lambda: ["not", "a", "mapping"]
+    definition.config_resolver = lambda raw: ["not", "a", "mapping"]
     terminal_backend_registry.register(definition)
 
     with pytest.raises(TypeError, match="config_resolver must return a mapping"):
