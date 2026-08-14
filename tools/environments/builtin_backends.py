@@ -371,6 +371,14 @@ def _builtin_backend_definitions() -> tuple[BackendDefinition, ...]:
                 supports_image=True, supports_resource_limits=True
             ),
             default_cwd="/root",
+            config_schema={
+                "modal_mode": {
+                    "type": "select",
+                    "description": "Modal sandbox mode",
+                    "options": ["sandbox", "function"],
+                    "config_key": "terminal.modal_mode",
+                },
+            },
             source="builtin",
         ),
         BackendDefinition(
@@ -393,6 +401,14 @@ def _builtin_backend_definitions() -> tuple[BackendDefinition, ...]:
             availability_check=_vercel_sandbox_available,
             capabilities=_remote_capabilities(supports_resource_limits=True),
             default_cwd="/vercel/sandbox",
+            config_schema={
+                "vercel_runtime": {
+                    "type": "select",
+                    "description": "Vercel Sandbox runtime",
+                    "options": ["node24", "node22", "python3.13"],
+                    "config_key": "terminal.vercel_runtime",
+                },
+            },
             source="builtin",
         ),
         BackendDefinition(

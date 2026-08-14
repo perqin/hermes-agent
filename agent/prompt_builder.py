@@ -1094,8 +1094,10 @@ def _is_remote_terminal_backend(backend: str) -> bool:
 
 def _backend_fallback_description(backend: str) -> str:
     definition = _backend_definition(backend)
-    if definition is not None and definition.description.strip():
-        return definition.description.strip()
+    if definition is not None:
+        description = definition.validated_picker_metadata()["description"].strip()
+        if description:
+            return description
     return f"a {backend} environment (likely Linux)"
 
 

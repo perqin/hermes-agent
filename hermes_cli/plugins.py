@@ -2464,24 +2464,24 @@ class PluginContext:
             source=self.manifest.source,
             plugin_name=plugin_id,
         )
-        registry = registry_module.terminal_backend_registry
-        registry.register(registered)
-        self._manager._plugin_terminal_backend_names.add(registered.name)
+        registry = registry_module.current_terminal_backend_registry()
+        registered_name = registered.name
+        registered_snapshot = registry.register(registered)
+        self._manager._plugin_terminal_backend_names.add(registered_name)
 
         def _release_terminal_backend() -> None:
-            if registry.get(registered.name) is registered:
-                registry.unregister(registered.name)
-            self._manager._plugin_terminal_backend_names.discard(registered.name)
+            registry.unregister_if_same(registered_name, registered_snapshot)
+            self._manager._plugin_terminal_backend_names.discard(registered_name)
 
         handle = self._track(
             "terminal_backend",
-            registered.name,
+            registered_name,
             _release_terminal_backend,
         )
         logger.debug(
             "Plugin %s registered terminal backend: %s",
             self.manifest.name,
-            registered.name,
+            registered_name,
         )
         return handle
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import fields, replace
 from threading import Barrier, Thread
 
@@ -14,6 +15,8 @@ from tools.environments.builtin_backends import (
 from tools.environments.manager import EnvironmentManager
 from tools.environments.registry import (
     BackendAlreadyRegisteredError,
+    BackendDefinitionMutatedError,
+    ProfileScopedTerminalBackendRegistry,
     TerminalBackendRegistry,
 )
 
@@ -42,6 +45,88 @@ def test_manager_registers_every_selectable_legacy_builtin(registry):
     )
     assert "managed_modal" in RESERVED_BUILTIN_BACKEND_NAMES
     assert registry.get("managed_modal") is None
+
+
+def test_profile_scoped_registry_isolates_same_named_plugin_backends(tmp_path):
+    from tools.environments import BackendDefinition
+
+    active_home = tmp_path / "one"
+    registry = ProfileScopedTerminalBackendRegistry(lambda: active_home)
+    first = BackendDefinition(name="coder", factory=lambda request: object())
+    registry.register(first)
+
+    active_home = tmp_path / "two"
+    second = BackendDefinition(name="coder", factory=lambda request: object())
+    registry.register(second)
+
+    assert registry.require("coder") is second
+    active_home = tmp_path / "one"
+    assert registry.require("coder") is first
+
+
+def test_registry_fails_closed_when_registered_name_is_mutated():
+    from tools.environments import BackendDefinition
+
+    registry = TerminalBackendRegistry()
+    definition = BackendDefinition(name="coder", factory=lambda request: object())
+    registered = registry.register(definition)
+
+    definition.name = "renamed"
+
+    for operation in (
+        lambda: registry.get("coder"),
+        lambda: registry.get("renamed"),
+        registry.list_definitions,
+        lambda: registry.register(
+            BackendDefinition(name="other", factory=lambda request: object())
+        ),
+    ):
+        with pytest.raises(BackendDefinitionMutatedError, match="mutated"):
+            operation()
+
+    assert registry.unregister_if_same("coder", registered) is definition
+    assert registry.list_definitions() == ()
+
+
+@pytest.mark.parametrize("field", ["label", "description", "install_hint"])
+def test_registry_revalidates_mutated_picker_metadata(field):
+    from tools.environments import BackendDefinition
+
+    registry = TerminalBackendRegistry()
+    definition = BackendDefinition(name="coder", factory=lambda request: object())
+    registry.register(definition)
+
+    setattr(definition, field, object())
+
+    with pytest.raises(TypeError, match=rf"{field} must be a string"):
+        registry.list_definitions()
+
+
+def test_profile_scoped_registry_isolates_concurrent_contexts(tmp_path):
+    from tools.environments import BackendDefinition
+
+    active_home = ContextVar("backend_registry_test_home", default=tmp_path / "main")
+    registry = ProfileScopedTerminalBackendRegistry(active_home.get)
+    barrier = Barrier(2)
+    definitions = {}
+
+    def register(profile):
+        active_home.set(tmp_path / profile)
+        definition = BackendDefinition(name="coder", factory=lambda request: object())
+        barrier.wait(timeout=5)
+        registry.register(definition)
+        definitions[profile] = definition
+
+    threads = [Thread(target=register, args=(profile,)) for profile in ("one", "two")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    for profile in ("one", "two"):
+        active_home.set(tmp_path / profile)
+        assert registry.require("coder") is definitions[profile]
 
 
 def test_selectable_and_reserved_names_are_derived_from_canonical_inventory():

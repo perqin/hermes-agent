@@ -10,6 +10,10 @@ import type { TerminalBackendInfo, TerminalBackendsResponse } from '@/types/herm
 
 import { Pill } from './primitives'
 
+function pickerText(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
 interface TerminalBackendPanelProps {
   /** Re-read the parent toolset list after a backend change so any derived
    *  pills stay in sync. */
@@ -88,10 +92,14 @@ export function TerminalBackendPanel({ onConfiguredChange }: TerminalBackendPane
             }
           : current
       )
-      notify({ kind: 'success', title: copy.selectedTitle, message: copy.selectedMessage(backend.label) })
+      notify({
+        kind: 'success',
+        title: copy.selectedTitle,
+        message: copy.selectedMessage(pickerText(backend.label, backend.name))
+      })
       onConfiguredChange?.()
     } catch (err) {
-      notifyError(err, copy.failedSelect(backend.label))
+      notifyError(err, copy.failedSelect(pickerText(backend.label, backend.name)))
     } finally {
       setSelecting(null)
     }
@@ -134,7 +142,7 @@ export function TerminalBackendPanel({ onConfiguredChange }: TerminalBackendPane
             type="button"
           >
             <span className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium">{backend.label}</span>
+              <span className="text-xs font-medium">{pickerText(backend.label, backend.name)}</span>
               <StatusPill backend={backend} />
               {backend.active && (
                 <Pill tone="primary">
@@ -144,11 +152,11 @@ export function TerminalBackendPanel({ onConfiguredChange }: TerminalBackendPane
               )}
               {selecting === backend.name && <Loader2 className="size-3 animate-spin" />}
             </span>
-            <span className="text-[0.68rem] text-muted-foreground">{backend.description}</span>
+            <span className="text-[0.68rem] text-muted-foreground">{pickerText(backend.description)}</span>
             {backend.status !== 'ready' && backend.detail && (
               <span className="flex items-start gap-1 text-[0.68rem] text-amber-600 dark:text-amber-300">
                 <AlertTriangle className="mt-0.5 size-3 shrink-0" />
-                {backend.detail}
+                {pickerText(backend.detail)}
                 {backend.active && ` ${copy.needsSetupHint}`}
               </span>
             )}
