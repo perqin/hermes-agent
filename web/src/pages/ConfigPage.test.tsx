@@ -3,16 +3,56 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+type Api = typeof import("@/lib/api").api;
+type ConfigResult = Awaited<ReturnType<Api["getConfig"]>>;
+type SchemaResult = Awaited<ReturnType<Api["getSchema"]>>;
+type ConfigRawResult = Awaited<ReturnType<Api["getConfigRaw"]>>;
+type StatusResult = Awaited<ReturnType<Api["getStatus"]>>;
+type SaveConfigResult = Awaited<ReturnType<Api["saveConfig"]>>;
+type SaveConfigRawResult = Awaited<ReturnType<Api["saveConfigRaw"]>>;
+
+const statusResult = (configPath: string): StatusResult => ({
+  active_sessions: 0,
+  config_path: configPath,
+  config_version: 0,
+  env_path: "",
+  gateway_exit_reason: null,
+  gateway_health_url: null,
+  gateway_pid: null,
+  gateway_platforms: {},
+  gateway_running: false,
+  gateway_state: null,
+  gateway_updated_at: null,
+  hermes_home: "",
+  latest_config_version: 0,
+  release_date: "",
+  version: "",
+});
+
 const profileState = vi.hoisted(() => ({ profile: "one" }));
 const toastMocks = vi.hoisted(() => ({ showToast: vi.fn() }));
 const apiMocks = vi.hoisted(() => ({
-  getConfig: vi.fn(() => new Promise<never>(() => {})),
-  getSchema: vi.fn(() => new Promise<never>(() => {})),
-  getDefaults: vi.fn(() => new Promise<never>(() => {})),
-  getConfigRaw: vi.fn(() => new Promise<never>(() => {})),
-  getStatus: vi.fn(() => new Promise<never>(() => {})),
-  saveConfigRaw: vi.fn(() => new Promise<never>(() => {})),
-  saveConfig: vi.fn(() => new Promise<never>(() => {})),
+  getConfig: vi.fn<
+    (...args: Parameters<Api["getConfig"]>) => Promise<ConfigResult>
+  >(() => new Promise<ConfigResult>(() => {})),
+  getSchema: vi.fn<
+    (...args: Parameters<Api["getSchema"]>) => Promise<SchemaResult>
+  >(() => new Promise<SchemaResult>(() => {})),
+  getDefaults: vi.fn<
+    (...args: Parameters<Api["getDefaults"]>) => Promise<ConfigResult>
+  >(() => new Promise<ConfigResult>(() => {})),
+  getConfigRaw: vi.fn<
+    (...args: Parameters<Api["getConfigRaw"]>) => Promise<ConfigRawResult>
+  >(() => new Promise<ConfigRawResult>(() => {})),
+  getStatus: vi.fn<
+    (...args: Parameters<Api["getStatus"]>) => Promise<StatusResult>
+  >(() => new Promise<StatusResult>(() => {})),
+  saveConfigRaw: vi.fn<
+    (...args: Parameters<Api["saveConfigRaw"]>) => Promise<SaveConfigRawResult>
+  >(() => new Promise<SaveConfigRawResult>(() => {})),
+  saveConfig: vi.fn<
+    (...args: Parameters<Api["saveConfig"]>) => Promise<SaveConfigResult>
+  >(() => new Promise<SaveConfigResult>(() => {})),
 }));
 
 vi.mock("@/lib/api", () => ({ api: apiMocks }));
@@ -108,12 +148,12 @@ describe("ConfigPage profile scope", () => {
     apiMocks.getConfig.mockResolvedValue({});
     apiMocks.getSchema.mockResolvedValue({ fields: {}, category_order: [] });
     apiMocks.getDefaults.mockResolvedValue({});
-    apiMocks.getStatus.mockResolvedValue({ config_path: "" });
+    apiMocks.getStatus.mockResolvedValue(statusResult(""));
     apiMocks.getConfigRaw
       .mockResolvedValueOnce({ yaml: "profile: A", path: "/profiles/A/config.yaml" })
       .mockResolvedValueOnce({ yaml: "profile: A", path: "/profiles/A/config.yaml" })
       .mockReturnValue(pendingRaw);
-    apiMocks.saveConfigRaw.mockResolvedValue(undefined);
+    apiMocks.saveConfigRaw.mockResolvedValue({ ok: true });
 
     await act(async () => root.render(<ConfigPage />));
     const yamlButton = [...container.querySelectorAll("button")].find(
@@ -152,8 +192,8 @@ describe("ConfigPage profile scope", () => {
     });
     apiMocks.getDefaults.mockResolvedValue({ value: "default" });
     apiMocks.getConfigRaw.mockResolvedValue({ yaml: "value: A", path: "" });
-    apiMocks.getStatus.mockResolvedValue({ config_path: "" });
-    apiMocks.saveConfigRaw.mockResolvedValue(undefined);
+    apiMocks.getStatus.mockResolvedValue(statusResult(""));
+    apiMocks.saveConfigRaw.mockResolvedValue({ ok: true });
 
     await act(async () => {
       root.render(<ConfigPage />);
@@ -199,8 +239,8 @@ describe("ConfigPage profile scope", () => {
     const aConfig = deferred<Record<string, unknown>>();
     const aSchema = deferred<{ fields: Record<string, unknown>; category_order: string[] }>();
     const aDefaults = deferred<Record<string, unknown>>();
-    const aRaw = deferred<{ yaml: string; path: string }>();
-    const aStatus = deferred<{ config_path: string }>();
+    const aRaw = deferred<ConfigRawResult>();
+    const aStatus = deferred<StatusResult>();
     apiMocks.getConfig
       .mockReturnValueOnce(aConfig.promise)
       .mockResolvedValueOnce({ value: "B" });
@@ -218,7 +258,7 @@ describe("ConfigPage profile scope", () => {
       .mockResolvedValueOnce({ yaml: "value: B", path: "/profiles/B/config.yaml" });
     apiMocks.getStatus
       .mockReturnValueOnce(aStatus.promise)
-      .mockResolvedValueOnce({ config_path: "/profiles/B/fallback.yaml" });
+      .mockResolvedValueOnce(statusResult("/profiles/B/fallback.yaml"));
 
     await act(async () => root.render(<ConfigPage />));
     profileState.profile = "two";
@@ -233,7 +273,7 @@ describe("ConfigPage profile scope", () => {
       });
       aDefaults.resolve({ value: "stale default" });
       aRaw.resolve({ yaml: "value: stale A", path: "/profiles/A/config.yaml" });
-      aStatus.resolve({ config_path: "/profiles/A/fallback.yaml" });
+      aStatus.resolve(statusResult("/profiles/A/fallback.yaml"));
     });
 
     expect(container.querySelector('input[value="B"]')).not.toBeNull();
@@ -256,8 +296,8 @@ describe("ConfigPage profile scope", () => {
       .mockReturnValueOnce(pendingSchema);
     apiMocks.getDefaults.mockResolvedValue({ value: "default" });
     apiMocks.getConfigRaw.mockResolvedValue({ yaml: "value: current", path: "" });
-    apiMocks.getStatus.mockResolvedValue({ config_path: "" });
-    apiMocks.saveConfig.mockResolvedValue(undefined);
+    apiMocks.getStatus.mockResolvedValue(statusResult(""));
+    apiMocks.saveConfig.mockResolvedValue({ ok: true });
 
     await act(async () => root.render(<ConfigPage />));
     const oldSaveButton = [...container.querySelectorAll("button")].find(
@@ -279,8 +319,8 @@ describe("ConfigPage profile scope", () => {
   });
 
   it("does not apply normal-save completion state to a later profile", async () => {
-    let resolveSave!: () => void;
-    const save = new Promise<void>((resolve) => {
+    let resolveSave!: (value: SaveConfigResult) => void;
+    const save = new Promise<SaveConfigResult>((resolve) => {
       resolveSave = resolve;
     });
     apiMocks.getConfig
@@ -292,7 +332,7 @@ describe("ConfigPage profile scope", () => {
     });
     apiMocks.getDefaults.mockResolvedValue({ value: "default" });
     apiMocks.getConfigRaw.mockResolvedValue({ yaml: "value: current", path: "" });
-    apiMocks.getStatus.mockResolvedValue({ config_path: "" });
+    apiMocks.getStatus.mockResolvedValue(statusResult(""));
     apiMocks.saveConfig.mockReturnValue(save);
 
     await act(async () => root.render(<ConfigPage />));
@@ -304,7 +344,7 @@ describe("ConfigPage profile scope", () => {
 
     profileState.profile = "two";
     await act(async () => root.render(<ConfigPage />));
-    await act(async () => resolveSave());
+    await act(async () => resolveSave({ ok: true }));
 
     expect(toastMocks.showToast).not.toHaveBeenCalled();
     expect(container.querySelector('input[value="B"]')).not.toBeNull();
@@ -337,7 +377,7 @@ describe("ConfigPage profile scope", () => {
     });
     apiMocks.getDefaults.mockResolvedValue({ value: "default" });
     apiMocks.getConfigRaw.mockResolvedValue({ yaml: "value: current", path: "" });
-    apiMocks.getStatus.mockResolvedValue({ config_path: "" });
+    apiMocks.getStatus.mockResolvedValue(statusResult(""));
 
     await act(async () => root.render(<ConfigPage />));
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -367,7 +407,7 @@ describe("ConfigPage profile scope", () => {
     });
     apiMocks.getDefaults.mockResolvedValue({ mode: "safe" });
     apiMocks.getConfigRaw.mockResolvedValue({ yaml: "mode: safe", path: "" });
-    apiMocks.getStatus.mockResolvedValue({ config_path: "" });
+    apiMocks.getStatus.mockResolvedValue(statusResult(""));
 
     await act(async () => root.render(<ConfigPage />));
 
