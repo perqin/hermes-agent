@@ -5,6 +5,7 @@ import type { TerminalBackendsResponse } from '@/types/hermes'
 
 const getTerminalBackends = vi.fn()
 const selectTerminalBackend = vi.fn()
+const setHermesConfigCache = vi.fn()
 
 vi.mock('@/hermes', () => ({
   getTerminalBackends: () => getTerminalBackends(),
@@ -14,6 +15,10 @@ vi.mock('@/hermes', () => ({
 vi.mock('@/store/notifications', () => ({
   notify: vi.fn(),
   notifyError: vi.fn()
+}))
+
+vi.mock('../hooks/use-config-record', () => ({
+  setHermesConfigCache: (next: unknown) => setHermesConfigCache(next)
 }))
 
 function backends(overrides: Partial<TerminalBackendsResponse> = {}): TerminalBackendsResponse {
@@ -98,6 +103,13 @@ describe('TerminalBackendPanel', () => {
 
     await waitFor(() => expect(selectTerminalBackend).toHaveBeenCalledWith('ssh'))
     await waitFor(() => expect(onConfiguredChange).toHaveBeenCalled())
+    expect(setHermesConfigCache).toHaveBeenCalledTimes(1)
+
+    const updateCache = setHermesConfigCache.mock.calls[0][0] as (
+      current: Record<string, unknown> | undefined
+    ) => Record<string, unknown> | undefined
+
+    expect(updateCache({ terminal: { backend: 'local' } })).toEqual({ terminal: { backend: 'ssh' } })
     // Active highlight moves without a refetch.
     const ssh = screen.getByRole('button', { name: /SSH/ })
     expect(ssh.getAttribute('aria-pressed')).toBe('true')

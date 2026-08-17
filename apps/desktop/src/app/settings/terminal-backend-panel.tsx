@@ -8,6 +8,9 @@ import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
 import type { TerminalBackendInfo, TerminalBackendsResponse } from '@/types/hermes'
 
+import { setHermesConfigCache } from '../hooks/use-config-record'
+
+import { setNested } from './helpers'
 import { Pill } from './primitives'
 
 function pickerText(value: unknown, fallback = ''): string {
@@ -92,6 +95,7 @@ export function TerminalBackendPanel({ onConfiguredChange }: TerminalBackendPane
             }
           : current
       )
+      setHermesConfigCache(current => (current ? setNested(current, 'terminal.backend', backend.name) : current))
       notify({
         kind: 'success',
         title: copy.selectedTitle,

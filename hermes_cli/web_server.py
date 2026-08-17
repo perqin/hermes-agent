@@ -1371,6 +1371,11 @@ def _schema_with_dynamic_provider_options() -> Dict[str, Dict[str, Any]]:
                     f"conflicts with {conflicting_key!r}"
                 )
             entry.setdefault("category", "terminal")
+            # Frontends can distinguish backend-owned fields from the broader
+            # terminal category and show only the selected backend's settings.
+            # This is server-owned metadata: plugin descriptors cannot spoof a
+            # different owner because the registry definition name wins here.
+            entry["terminal_backend"] = definition.name
             overlay[key] = entry
 
     if not overlay:

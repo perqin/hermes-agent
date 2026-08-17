@@ -2595,6 +2595,7 @@ class TestNewEndpoints:
             "type": "string",
             "description": "Coder workspace name",
             "category": "terminal",
+            "terminal_backend": "coder",
         }
 
     def test_builtin_terminal_config_schema_preserves_dashboard_keys(self):
@@ -2603,11 +2604,13 @@ class TestNewEndpoints:
         fields = web_server._schema_with_dynamic_provider_options()
 
         assert fields["terminal.modal_mode"]["options"] == ["sandbox", "function"]
+        assert fields["terminal.modal_mode"]["terminal_backend"] == "modal"
         assert fields["terminal.vercel_runtime"]["options"] == [
             "node24",
             "node22",
             "python3.13",
         ]
+        assert fields["terminal.vercel_runtime"]["terminal_backend"] == "vercel_sandbox"
 
     def test_terminal_config_schema_rejects_cross_namespace_key(
         self, monkeypatch
