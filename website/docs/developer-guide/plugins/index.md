@@ -25,6 +25,7 @@ Hermes has several distinct pluggable interfaces — some use Python `register_*
 | A **video-generation backend** | [Video Generation Provider Plugins](/developer-guide/video-gen-provider-plugin) |
 | A **web-search / extract backend** | [Web Search Provider Plugins](/developer-guide/web-search-provider-plugin) |
 | A **cloud browser backend** (Browserbase-style CDP session provider) | [Browser Provider Plugins](/developer-guide/browser-provider-plugin) |
+| A **terminal backend** (Coder, a custom remote workspace, or another execution sandbox) | [Terminal Backend Plugins](/developer-guide/plugins/terminal-backend) |
 | A **secret-manager backend** (vault / password manager / OS keystore) | [Secret Source Plugins](/developer-guide/secret-source-plugin) |
 | A **dashboard OIDC/auth provider** | [Web Dashboard — custom providers](/user-guide/features/web-dashboard#custom-providers) — `ctx.register_dashboard_auth_provider()` |
 | A **TTS backend** (any CLI — Piper, VoxCPM, Kokoro, voice cloning, …) | [TTS custom command providers](/user-guide/features/tts#custom-command-providers) — config-driven, no Python needed |
@@ -1243,7 +1244,64 @@ This guide covers **general plugins** (tools, hooks, slash commands, CLI command
 
 ## Specialized plugin types
 
-Hermes has five specialized plugin types beyond the general surface. Each ships as a directory under `plugins/<category>/<name>/` (bundled) or `~/.hermes/plugins/<category>/<name>/` (user). The contract differs by category — pick the one you need, then read its full guide.
+Hermes has several specialized plugin types beyond the general surface. Most
+provider categories use `plugins/<category>/<name>/` (bundled) or
+`~/.hermes/plugins/<category>/<name>/` (user). Terminal backends instead use
+the root general-plugin layout or a pip entry point. The contract differs by
+type — pick the one you need, then read its full guide.
+
+### Terminal backend plugins — add an execution environment
+
+Terminal backend plugins let the existing terminal, file, and `execute_code`
+tools run in a custom environment such as a Coder workspace or remote sandbox.
+The plugin registers a declarative `BackendDefinition`; Hermes owns the
+profile-scoped registry, configuration handoff, environment lifecycle, and
+frontend picker/schema integration.
+
+```python
+from tools.environments import (
+    BackendCapabilities,
+    BackendDefinition,
+    ExecutionLocation,
+    FilesystemSemantics,
+)
+
+
+def create_environment(request):
+    return CoderEnvironment(
+        workspace=request.backend_config["workspace"],
+        cwd=request.cwd,
+        timeout=request.timeout,
+    )
+
+
+def register(ctx):
+    ctx.register_terminal_backend(BackendDefinition(
+        name="coder",
+        label="Coder",
+        description="Run commands in a Coder workspace",
+        factory=create_environment,
+        capabilities=BackendCapabilities(
+            execution_location=ExecutionLocation.REMOTE,
+            filesystem_semantics=FilesystemSemantics.ISOLATED,
+            requires_sandbox_cwd=True,
+        ),
+        config_schema={
+            "workspace": {
+                "type": "string",
+                "description": "Coder workspace name",
+                "required": True,
+            },
+        },
+    ))
+```
+
+Backend-specific profile configuration is stored under
+`terminal.backends.<backend>`. Built-ins keep their existing `terminal.*`
+keys for backward compatibility; third-party plugins cannot project fields
+onto those core-owned paths.
+
+**Full guide:** [Terminal Backend Plugins](/developer-guide/plugins/terminal-backend) — `BaseEnvironment`, capabilities, schema fields, config resolution, availability, factory requests, profile isolation, and testing.
 
 ### Model provider plugins — add an LLM backend
 

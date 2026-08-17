@@ -134,7 +134,7 @@ Before that stash step, Hermes also restores tracked `package-lock.json` diffs l
 
 ## Terminal Backend Configuration
 
-Hermes supports seven terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox (direct or via the Nous-managed gateway), a Daytona workspace, a Vercel Sandbox, or a Singularity/Apptainer container.
+Hermes ships seven terminal backends and can discover additional backends from enabled plugins. The selected backend determines where the agent's shell commands actually execute — your local machine, a container, a remote host, a cloud sandbox, or a plugin-provided environment such as a Coder workspace.
 
 ```yaml
 terminal:
@@ -153,6 +153,74 @@ terminal:
 
 For cloud sandboxes such as Modal, Daytona, and Vercel Sandbox, `container_persistent: true` means Hermes will try to preserve filesystem state across sandbox recreation. It does not promise that the same live sandbox, PID space, or background processes will still be running later.
 
+### Plugin-provided backends
+
+Enabled plugins can register additional terminal backends at runtime. Dashboard
+and Desktop read the active profile's backend registry, so plugin backends and
+their configuration fields appear without a Hermes frontend update.
+
+Install and enable the plugin, then select its registered backend name:
+
+```bash
+hermes plugins install owner/hermes-plugin-coder --enable
+hermes config set terminal.backend coder
+hermes config set terminal.backends.coder.workspace development
+```
+
+The equivalent profile configuration is:
+
+```yaml
+terminal:
+  backend: coder
+  backends:
+    coder:
+      workspace: development
+      url: https://coder.example.com
+```
+
+Plugin configuration is profile-local. Enabling or configuring `coder` in one
+profile does not make it available in another profile; install/enable it and
+set `terminal.backend` in each profile that should use it.
+
+:::warning Keep credentials out of `config.yaml`
+If the plugin documents an environment variable for a token or password, store
+that credential in the profile's `.env` by setting the documented uppercase
+environment key, for example
+`hermes config set CODER_SESSION_TOKEN <token>`. Do not set the lowercase
+schema path for a secret unless the plugin explicitly requires YAML storage. A
+schema field's `env` label tells setup surfaces about the variable, but the
+plugin's resolver must actually read it. Non-secret settings such as workspace
+names, URLs, resource limits, and timeouts belong under
+`terminal.backends.<backend>` in `config.yaml`.
+:::
+
+The namespace boundary is intentional:
+
+| Backend type | Configuration namespace | Compatibility rule |
+|---|---|---|
+| Built-in (`local`, `docker`, `ssh`, `modal`, `daytona`, `vercel_sandbox`, `singularity`) | Existing `terminal.<field>` keys | Legacy YAML and supported `TERMINAL_*` bridges remain valid. |
+| Plugin backend | `terminal.backends.<backend>.<field>` | Plugins cannot claim core-owned `terminal.*` paths. |
+
+Do not move built-in settings such as `terminal.docker_image` or
+`terminal.modal_mode` under `terminal.backends`. Backend-specific fields
+declared by built-in `BackendDefinition.config_schema` project onto their
+existing legacy keys, while the other established built-in fields remain in
+the core schema. Both paths preserve stored configuration and environment
+compatibility. `terminal.backend` is the
+canonical selector across CLI, Gateway, Dashboard, and Desktop. The older
+`terminal.env_type` spelling is a classic-CLI compatibility alias, and
+`TERMINAL_ENV` remains a legacy environment bridge; use `terminal.backend` in
+new configuration.
+
+For plugin backends, the plugin owns field-level defaults and any documented
+environment overrides in its config resolver. The same resolved snapshot is
+used for readiness checks and runtime construction; unknown plugin-local keys
+are preserved when Dashboard or Desktop saves another setting.
+
+Plugin authors can add a backend with
+`ctx.register_terminal_backend(BackendDefinition(...))`; see
+[Terminal Backend Plugins](/developer-guide/plugins/terminal-backend).
+
 ### Backend Overview
 
 | Backend | Where commands run | Isolation | Best for |
@@ -164,6 +232,7 @@ For cloud sandboxes such as Modal, Daytona, and Vercel Sandbox, `container_persi
 | **daytona** | Daytona workspace | Full (cloud container) | Managed cloud dev environments |
 | **vercel_sandbox** | Vercel Sandbox | Full (cloud microVM) | Cloud execution with snapshot-backed filesystem persistence |
 | **singularity** | Singularity/Apptainer container | Namespaces (--containall) | HPC clusters, shared machines |
+| **Plugin-defined** | Backend-specific | Declared by the plugin | Coder and custom remote/sandbox environments |
 
 ### Local Backend
 
