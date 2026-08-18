@@ -134,7 +134,7 @@ Before that stash step, Hermes also restores tracked `package-lock.json` diffs l
 
 ## Terminal Backend Configuration
 
-Hermes ships seven terminal backends and can discover additional backends from enabled plugins. The selected backend determines where the agent's shell commands actually execute — your local machine, a container, a remote host, a cloud sandbox, or a plugin-provided environment such as a Coder workspace.
+Hermes ships seven terminal backends and can discover additional backends from enabled plugins. The selected backend determines where the agent's shell commands actually execute — your local machine, a container, a remote host, a cloud sandbox, or a plugin-provided environment such as a remote workspace.
 
 ```yaml
 terminal:
@@ -162,23 +162,23 @@ their configuration fields appear without a Hermes frontend update.
 Install and enable the plugin, then select its registered backend name:
 
 ```bash
-hermes plugins install owner/hermes-plugin-coder --enable
-hermes config set terminal.backend coder
-hermes config set terminal.backends.coder.workspace development
+hermes plugins install owner/hermes-plugin-remote-workspace --enable
+hermes config set terminal.backend remote_workspace
+hermes config set terminal.backends.remote_workspace.workspace development
 ```
 
 The equivalent profile configuration is:
 
 ```yaml
 terminal:
-  backend: coder
+  backend: remote_workspace
   backends:
-    coder:
+    remote_workspace:
       workspace: development
-      url: https://coder.example.com
+      url: https://workspace.example.com
 ```
 
-Plugin configuration is profile-local. Enabling or configuring `coder` in one
+Plugin configuration is profile-local. Enabling or configuring `remote_workspace` in one
 profile does not make it available in another profile; install/enable it and
 set `terminal.backend` in each profile that should use it.
 
@@ -186,7 +186,7 @@ set `terminal.backend` in each profile that should use it.
 If the plugin documents an environment variable for a token or password, store
 that credential in the profile's `.env` by setting the documented uppercase
 environment key, for example
-`hermes config set CODER_SESSION_TOKEN <token>`. Do not set the lowercase
+`hermes config set REMOTE_WORKSPACE_TOKEN <token>`. Do not set the lowercase
 schema path for a secret unless the plugin explicitly requires YAML storage. A
 schema field's `env` label tells setup surfaces about the variable, but the
 plugin's resolver must actually read it. Non-secret settings such as workspace
@@ -232,7 +232,7 @@ Plugin authors can add a backend with
 | **daytona** | Daytona workspace | Full (cloud container) | Managed cloud dev environments |
 | **vercel_sandbox** | Vercel Sandbox | Full (cloud microVM) | Cloud execution with snapshot-backed filesystem persistence |
 | **singularity** | Singularity/Apptainer container | Namespaces (--containall) | HPC clusters, shared machines |
-| **Plugin-defined** | Backend-specific | Declared by the plugin | Coder and custom remote/sandbox environments |
+| **Plugin-defined** | Backend-specific | Declared by the plugin | Custom remote workspace and sandbox environments |
 
 ### Local Backend
 
@@ -2273,7 +2273,7 @@ web:
 
 **SearXNG** is a free, self-hosted, privacy-respecting metasearch engine that queries 70+ search engines. No API key needed — just set `SEARXNG_URL` to your instance (e.g., `http://localhost:8080`). SearXNG is search-only; `web_extract` requires a separate extract provider (set `web.extract_backend`). See the [Web Search setup guide](/user-guide/features/web-search) for Docker setup instructions.
 
-**Self-hosted Firecrawl:** Set `FIRECRAWL_API_URL` to point at your own instance. When a custom URL is set, the API key becomes optional (set `USE_DB_AUTHENTICATION=*** on the server to disable auth).
+**Self-hosted Firecrawl:** Set `FIRECRAWL_API_URL` to point at your own instance. When a custom URL is set, the API key becomes optional (set `USE_DB_AUTHENTICATION=false` on the server to disable auth).
 
 **Parallel search modes:** Set `PARALLEL_SEARCH_MODE` to control search behavior — `fast`, `one-shot`, or `agentic` (default: `agentic`).
 

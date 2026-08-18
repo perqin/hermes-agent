@@ -8,7 +8,7 @@ description: "Build a plugin that runs terminal, file, and code tools in a custo
 
 A terminal backend plugin adds an execution environment to Hermes without adding a new model-facing tool. Once selected, the backend powers the existing `terminal`, file, and `execute_code` tools through the same host-owned lifecycle used by built-in backends.
 
-Use this interface for integrations such as a Coder workspace, a remote development service, or a custom sandbox. Third-party product integrations should ship as standalone plugin repositories rather than as new directories in the Hermes core tree.
+Use this interface for integrations such as a remote workspace service, a hosted development environment, or a custom sandbox. Third-party product integrations should ship as standalone plugin repositories rather than as new directories in the Hermes core tree.
 
 ## How it fits together
 
@@ -37,8 +37,8 @@ Terminal backends use the normal native plugin discovery paths:
 Third-party plugins are opt-in. Install and enable the plugin before selecting its backend:
 
 ```bash
-hermes plugins install owner/hermes-plugin-coder --enable
-hermes config set terminal.backend coder
+hermes plugins install owner/hermes-plugin-remote-workspace --enable
+hermes config set terminal.backend remote_workspace
 ```
 
 Plugin discovery and backend registries are profile-scoped. Enable and configure the plugin in every profile that should use it.
@@ -49,20 +49,20 @@ A directory-installed plugin must keep `__init__.py` beside `plugin.yaml`,
 because native discovery imports the plugin directory itself:
 
 ```text
-hermes-plugin-coder/
+hermes-plugin-remote-workspace/
 ├── plugin.yaml
 ├── __init__.py             # register(ctx)
 └── environment.py          # BaseEnvironment implementation
 ```
 
 A pip-distributed plugin may instead use a normal import package such as
-`hermes_plugin_coder/`. Its `hermes_agent.plugins` entry point must resolve to
+`hermes_plugin_remote_workspace/`. Its `hermes_agent.plugins` entry point must resolve to
 the **module** that exposes `register(ctx)`, not directly to the `register`
 callable:
 
 ```toml
 [project.entry-points."hermes_agent.plugins"]
-hermes-plugin-coder = "hermes_plugin_coder"
+hermes-plugin-remote-workspace = "hermes_plugin_remote_workspace"
 ```
 
 Hermes loads that module and then looks up its `register` attribute. In this
@@ -73,9 +73,9 @@ do not copy the nested package layout into `~/.hermes/plugins/` without a root
 `plugin.yaml` uses the ordinary native manifest. A backend does not need to declare a built-in-tool override:
 
 ```yaml
-name: hermes-plugin-coder
+name: hermes-plugin-remote-workspace
 version: 1.0.0
-description: Run Hermes commands in a Coder workspace
+description: Run Hermes commands in a remote workspace
 kind: backend
 ```
 
@@ -87,10 +87,20 @@ Every factory must return a subclass of `tools.environments.BaseEnvironment`. Th
 from tools.environments import BaseEnvironment
 
 
-class CoderEnvironment(BaseEnvironment):
-    def __init__(self, *, workspace: str, cwd: str, timeout: int):
+class RemoteWorkspaceEnvironment(BaseEnvironment):
+    def __init__(
+        self,
+        *,
+        workspace: str,
+        url: str,
+        token: str,
+        cwd: str,
+        timeout: int,
+    ):
         super().__init__(cwd=cwd, timeout=timeout)
         self.workspace = workspace
+        self.url = url
+        self.token = token
 
     def _run_bash(
         self,
@@ -102,8 +112,10 @@ class CoderEnvironment(BaseEnvironment):
     ):
         # Start the command through your transport and return a ProcessHandle-
         # compatible object. See tools.environments.base.ProcessHandle.
-        return start_coder_process(
+        return start_remote_workspace_process(
             workspace=self.workspace,
+            url=self.url,
+            token=self.token,
             command=cmd_string,
             login=login,
             timeout=timeout,
@@ -112,7 +124,7 @@ class CoderEnvironment(BaseEnvironment):
 
     def cleanup(self) -> None:
         # Release connections or ephemeral resources. Keep this idempotent.
-        close_coder_connection(self.workspace)
+        close_remote_workspace_connection(self.workspace)
 ```
 
 `_run_bash()` may return `subprocess.Popen` or another object satisfying the public `ProcessHandle` protocol. That protocol exposes `poll()`, `kill()`, `wait()`, `stdout`, and `returncode`; it does not expose a separate `stderr` stream. If your SDK only offers a blocking call, use `ThreadedProcessHandle` from `tools.environments` to adapt combined output, exit status, and optional cancellation.
@@ -134,30 +146,36 @@ from tools.environments import (
     FilesystemSemantics,
 )
 
-from .environment import CoderEnvironment
+from .environment import RemoteWorkspaceEnvironment
 
 
 def resolve_config(raw):
-    # raw is a defensive copy of terminal.backends.coder for this profile.
+    # raw is a defensive copy of terminal.backends.remote_workspace for this profile.
     resolved = {
         "workspace": raw.get("workspace", ""),
         "url": raw.get("url", ""),
         "token": raw.get("token", ""),
     }
     # Schema `env` is presentation metadata, not automatic resolution.
-    if os.getenv("CODER_SESSION_TOKEN") is not None:
-        resolved["token"] = os.environ["CODER_SESSION_TOKEN"]
+    if os.getenv("REMOTE_WORKSPACE_TOKEN") is not None:
+        resolved["token"] = os.environ["REMOTE_WORKSPACE_TOKEN"]
     return resolved
 
 
 def config_is_available(config):
-    return bool(config.get("workspace") and config.get("token"))
+    return bool(
+        config.get("workspace")
+        and config.get("url")
+        and config.get("token")
+    )
 
 
 def create_environment(request: BackendFactoryRequest):
     config = request.backend_config
-    return CoderEnvironment(
+    return RemoteWorkspaceEnvironment(
         workspace=config["workspace"],
+        url=config["url"],
+        token=config["token"],
         cwd=request.cwd,
         timeout=request.timeout,
     )
@@ -166,9 +184,9 @@ def create_environment(request: BackendFactoryRequest):
 def register(ctx):
     ctx.register_terminal_backend(
         BackendDefinition(
-            name="coder",
-            label="Coder",
-            description="Run commands in a Coder workspace",
+            name="remote_workspace",
+            label="Remote Workspace",
+            description="Run commands in a remote workspace",
             factory=create_environment,
             default_cwd="~",
             capabilities=BackendCapabilities(
@@ -182,23 +200,24 @@ def register(ctx):
             config_schema={
                 "workspace": {
                     "type": "string",
-                    "description": "Coder workspace name",
+                    "description": "Remote workspace name",
                     "required": True,
                 },
                 "url": {
                     "type": "string",
-                    "description": "Coder deployment URL",
+                    "description": "Workspace service URL",
+                    "required": True,
                 },
                 "token": {
                     "type": "secret",
-                    "description": "Coder session token",
-                    "env": "CODER_SESSION_TOKEN",
+                    "description": "Workspace access token",
+                    "env": "REMOTE_WORKSPACE_TOKEN",
                     "required": True,
                 },
             },
             config_resolver=resolve_config,
             config_availability_check=config_is_available,
-            install_hint="Configure a workspace and Coder session token.",
+            install_hint="Configure a workspace and access token.",
         )
     )
 ```
@@ -259,18 +278,18 @@ Plugin fields are namespaced automatically:
 
 ```text
 config_schema field `workspace`
-    -> terminal.backends.coder.workspace
+    -> terminal.backends.remote_workspace.workspace
 ```
 
 A user profile therefore stores plugin configuration like this:
 
 ```yaml
 terminal:
-  backend: coder
+  backend: remote_workspace
   backends:
-    coder:
+    remote_workspace:
       workspace: development
-      url: https://coder.example.com
+      url: https://workspace.example.com
 ```
 
 Supported schema field types are `boolean`, `list`, `number`, `secret`, `select`, `string`, and `text`. A `select` field must provide `options` as a list of strings. Metadata must be JSON-safe. Unsafe path segments such as `__proto__`, `constructor`, and `prototype` are rejected.
