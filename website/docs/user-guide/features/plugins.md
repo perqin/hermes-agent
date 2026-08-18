@@ -121,9 +121,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 
 ### Terminal backend capabilities
 
-A terminal backend plugin does not add another tool schema. It supplies an
-execution environment for Hermes' existing terminal, file, and `execute_code`
-tools. The plugin registers a `BackendDefinition` containing:
+A terminal backend plugin does not add another tool schema. It supplies an execution environment for Hermes' existing terminal, file, and `execute_code` tools. The plugin registers a `BackendDefinition` containing:
 
 - a factory that returns a `BaseEnvironment`;
 - a passive availability check and optional config-aware readiness check;
@@ -131,34 +129,17 @@ tools. The plugin registers a `BackendDefinition` containing:
 - a resolver for profile-local backend configuration; and
 - behavioral capabilities describing execution and filesystem semantics.
 
-Backend capabilities include where commands execute (`local`, `remote`, or
-unknown), whether the filesystem is host, shared, or isolated, metadata about
-whether host cwd can be accepted, and support metadata for images, resource
-limits, PTY, background processes, file transfer, and persistence. Core
-currently consumes the filesystem and sandbox-cwd declarations for path routing. Execution
-location is used for prompt classification and a factory integrity check. The
-host-cwd and support flags describe the backend for diagnostics, compatibility,
-and future consumers; they do not currently gate tool features. Capabilities
-are **not** proof of isolation, do not replace host-observed security state, and
-cannot grant an approval bypass.
+Backend capabilities include where commands execute (`local`, `remote`, or unknown), whether the filesystem is host, shared, or isolated, metadata about whether host cwd can be accepted, and support metadata for images, resource limits, PTY, background processes, file transfer, and persistence. Core currently consumes the filesystem and sandbox-cwd declarations for path routing. Execution location is used for prompt classification and a factory integrity check. The host-cwd and support flags describe the backend for diagnostics, compatibility, and future consumers; they do not currently gate tool features. Capabilities are **not** proof of isolation, do not replace host-observed security state, and cannot grant an approval bypass.
 
-The active profile's registry drives both runtime lookup and the backend pickers
-in Dashboard/Desktop. An enabled plugin backend therefore appears as a new
-`terminal.backend` option along with the configuration fields it declares.
-Those fields are stored under:
+The active profile's registry drives both runtime lookup and the backend pickers in Dashboard/Desktop. An enabled plugin backend therefore appears as a new `terminal.backend` option along with the configuration fields it declares. Those fields are stored under:
 
 ```text
 terminal.backends.<backend-name>.<field-name>
 ```
 
-Built-in backends keep their established `terminal.<field>` keys for backward
-compatibility. Third-party plugins cannot use schema aliases to claim those
-core-owned paths or register a reserved built-in backend name.
+Built-in backends keep their established `terminal.<field>` keys for backward compatibility. Third-party plugins cannot use schema aliases to claim those core-owned paths or register a reserved built-in backend name.
 
-See [Terminal Backend Plugins](/developer-guide/plugins/terminal-backend) for
-the complete authoring contract and
-[Terminal Backend Configuration](/user-guide/configuration#terminal-backend-configuration)
-for installation and selection.
+See [Terminal Backend Plugins](/developer-guide/plugins/terminal-backend) for the complete authoring contract and [Terminal Backend Configuration](/user-guide/configuration#terminal-backend-configuration) for installation and selection.
 
 ## Plugin discovery
 
@@ -185,10 +166,7 @@ Within each source, Hermes also recognizes sub-category directories that route p
 | `plugins/context_engine/<name>/` | Context-compression engines (`ctx.register_context_engine()`) | **Own loader** in `plugins/context_engine/__init__.py` (one active at a time) |
 | `plugins/model-providers/<name>/` | LLM provider profiles (`register_provider(ProviderProfile(...))`) | **Own loader** in `providers/__init__.py` (lazily scanned on first `get_provider_profile()` call) |
 
-Terminal backend plugins normally use the root general-plugin layout and
-`kind: backend`. Their `register(ctx)` method calls
-`ctx.register_terminal_backend(...)`; definitions are kept in a
-profile-scoped terminal registry rather than a separate plugin directory.
+Terminal backend plugins use the normal directory layouts: either `plugins/<name>/` or `plugins/<category>/<name>/`, with `kind: backend`. Their `register(ctx)` method calls `ctx.register_terminal_backend(...)`; no terminal-specific directory name is required.
 
 User plugins at `~/.hermes/plugins/model-providers/<name>/` and `~/.hermes/plugins/memory/<name>/` override bundled plugins of the same name — last-writer-wins in `register_provider()` / `register_memory_provider()`. Drop a directory in, and it replaces the built-in without any repo edits.
 

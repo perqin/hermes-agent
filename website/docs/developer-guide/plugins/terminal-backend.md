@@ -28,11 +28,12 @@ The definition is also the source of truth for Dashboard and Desktop configurati
 
 ## Discovery and activation
 
-Terminal backends use the normal native plugin discovery paths:
+Terminal backends use the normal native plugin discovery paths. They may be installed directly under a plugin root or grouped one level deep in a category directory:
 
 1. User directory: `~/.hermes/plugins/<name>/`
-2. Project directory: `./.hermes/plugins/<name>/` when project plugins are enabled
-3. Pip package: the `hermes_agent.plugins` entry-point group
+2. User category directory: `~/.hermes/plugins/<category>/<name>/`
+3. Project directory: `./.hermes/plugins/<name>/` or `./.hermes/plugins/<category>/<name>/` when project plugins are enabled
+4. Pip package: the `hermes_agent.plugins` entry-point group
 
 Third-party plugins are opt-in. Install and enable the plugin before selecting its backend:
 
@@ -45,8 +46,7 @@ Plugin discovery and backend registries are profile-scoped. Enable and configure
 
 ## Directory structure
 
-A directory-installed plugin must keep `__init__.py` beside `plugin.yaml`,
-because native discovery imports the plugin directory itself:
+A directory-installed plugin must keep `__init__.py` beside `plugin.yaml`, because native discovery imports the plugin directory itself. The example below works either directly below a plugin root or below one category directory:
 
 ```text
 hermes-plugin-remote-workspace/
@@ -55,20 +55,14 @@ hermes-plugin-remote-workspace/
 └── environment.py          # BaseEnvironment implementation
 ```
 
-A pip-distributed plugin may instead use a normal import package such as
-`hermes_plugin_remote_workspace/`. Its `hermes_agent.plugins` entry point must resolve to
-the **module** that exposes `register(ctx)`, not directly to the `register`
-callable:
+A pip-distributed plugin may instead use a normal import package such as `hermes_plugin_remote_workspace/`. Its `hermes_agent.plugins` entry point must resolve to the **module** that exposes `register(ctx)`, not directly to the `register` callable:
 
 ```toml
 [project.entry-points."hermes_agent.plugins"]
 hermes-plugin-remote-workspace = "hermes_plugin_remote_workspace"
 ```
 
-Hermes loads that module and then looks up its `register` attribute. In this
-shape, package metadata and the entry point replace native directory discovery;
-do not copy the nested package layout into `~/.hermes/plugins/` without a root
-`__init__.py`.
+Hermes loads that module and then looks up its `register` attribute. In this shape, package metadata and the entry point replace native directory discovery; do not copy the nested package layout into a directory-discovered plugin without placing `__init__.py` beside `plugin.yaml`.
 
 `plugin.yaml` uses the ordinary native manifest. A backend does not need to declare a built-in-tool override:
 
@@ -246,13 +240,7 @@ Hermes stamps the plugin owner and source onto the registered copy. Registration
 
 ## Capabilities
 
-Capabilities describe backend behavior. Core currently uses
-`filesystem_semantics` and `requires_sandbox_cwd` when routing host and sandbox
-paths. It uses `execution_location` to classify remote execution in prompts and
-to reject a non-local definition whose factory returns `LocalEnvironment`.
-`accepts_host_cwd` and the `supports_*` fields are registry metadata: declare
-them accurately for diagnostics, compatibility checks, and future consumers,
-but do not assume they currently enable or disable a tool feature.
+Capabilities describe backend behavior. Core currently uses `filesystem_semantics` and `requires_sandbox_cwd` when routing host and sandbox paths. It uses `execution_location` to classify remote execution in prompts and to reject a non-local definition whose factory returns `LocalEnvironment`. `accepts_host_cwd` and the `supports_*` fields are registry metadata: declare them accurately for diagnostics, compatibility checks, and future consumers, but do not assume they currently enable or disable a tool feature.
 
 | Field | Typical meaning |
 |---|---|
@@ -267,10 +255,7 @@ but do not assume they currently enable or disable a tool feature.
 | `supports_file_transfer` | File tools can transfer data through this environment. |
 | `supports_persistence` | Backend can preserve filesystem state across recreation. |
 
-Declare only behavior your implementation actually supports. The path-related
-declarations influence current routing; support flags do not themselves grant
-functionality. Hermes does not treat any capability as proof of isolation or
-grant security exemptions from it.
+Declare only behavior your implementation actually supports. The path-related declarations influence current routing; support flags do not themselves grant functionality. Hermes does not treat any capability as proof of isolation or grant security exemptions from it.
 
 ## Configuration schema and namespace
 
@@ -312,9 +297,7 @@ Keep these responsibilities separate:
 
 - `request.backend_config`: resolved plugin-owned settings;
 - `request.terminal_config`: host-owned complete terminal configuration, primarily for built-in compatibility;
-- `request.cwd`, `timeout`, `image`, `task_id`, and `host_cwd`: host-owned
-  request context. Callers may leave optional context fields unset; in
-  particular, do not assume a profile name or Hermes home is present.
+- `request.cwd`, `timeout`, `image`, `task_id`, and `host_cwd`: host-owned request context. Callers may leave optional context fields unset; in particular, do not assume a profile name or Hermes home is present.
 
 Choose and document precedence in your resolver. A common policy is defaults, then profile YAML, then an environment override for credentials. Environment presence should be checked with `is not None`; an explicitly empty credential should fail readiness instead of silently falling back. Factories should validate the resolved mapping and must not reread YAML or environment variables.
 

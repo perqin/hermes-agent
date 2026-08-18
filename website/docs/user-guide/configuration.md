@@ -155,9 +155,7 @@ For cloud sandboxes such as Modal, Daytona, and Vercel Sandbox, `container_persi
 
 ### Plugin-provided backends
 
-Enabled plugins can register additional terminal backends at runtime. Dashboard
-and Desktop read the active profile's backend registry, so plugin backends and
-their configuration fields appear without a Hermes frontend update.
+Enabled plugins can add terminal backends to the backend selector in Dashboard and Desktop.
 
 Install and enable the plugin, then select its registered backend name:
 
@@ -178,48 +176,20 @@ terminal:
       url: https://workspace.example.com
 ```
 
-Plugin configuration is profile-local. Enabling or configuring `remote_workspace` in one
-profile does not make it available in another profile; install/enable it and
-set `terminal.backend` in each profile that should use it.
+Plugin configuration is profile-local. Enabling or configuring `remote_workspace` in one profile does not make it available in another profile; install and configure it in each profile that should use it.
 
 :::warning Keep credentials out of `config.yaml`
-If the plugin documents an environment variable for a token or password, store
-that credential in the profile's `.env` by setting the documented uppercase
-environment key, for example
-`hermes config set REMOTE_WORKSPACE_TOKEN <token>`. Do not set the lowercase
-schema path for a secret unless the plugin explicitly requires YAML storage. A
-schema field's `env` label tells setup surfaces about the variable, but the
-plugin's resolver must actually read it. Non-secret settings such as workspace
-names, URLs, resource limits, and timeouts belong under
-`terminal.backends.<backend>` in `config.yaml`.
+Follow the plugin's setup instructions for tokens and passwords. When it documents an environment variable, store the credential in the current profile's `.env` with the documented uppercase key, for example `hermes config set REMOTE_WORKSPACE_TOKEN <token>`. Store non-secret settings under `terminal.backends.<backend>` in `config.yaml`.
 :::
-
-The namespace boundary is intentional:
 
 | Backend type | Configuration namespace | Compatibility rule |
 |---|---|---|
-| Built-in (`local`, `docker`, `ssh`, `modal`, `daytona`, `vercel_sandbox`, `singularity`) | Existing `terminal.<field>` keys | Legacy YAML and supported `TERMINAL_*` bridges remain valid. |
-| Plugin backend | `terminal.backends.<backend>.<field>` | Plugins cannot claim core-owned `terminal.*` paths. |
+| Built-in (`local`, `docker`, `ssh`, `modal`, `daytona`, `vercel_sandbox`, `singularity`) | Existing `terminal.<field>` keys | Keep using the documented built-in fields. |
+| Plugin backend | `terminal.backends.<backend>.<field>` | Use the fields documented by the plugin. |
 
-Do not move built-in settings such as `terminal.docker_image` or
-`terminal.modal_mode` under `terminal.backends`. Backend-specific fields
-declared by built-in `BackendDefinition.config_schema` project onto their
-existing legacy keys, while the other established built-in fields remain in
-the core schema. Both paths preserve stored configuration and environment
-compatibility. `terminal.backend` is the
-canonical selector across CLI, Gateway, Dashboard, and Desktop. The older
-`terminal.env_type` spelling is a classic-CLI compatibility alias, and
-`TERMINAL_ENV` remains a legacy environment bridge; use `terminal.backend` in
-new configuration.
+Keep built-in settings such as `terminal.docker_image` and `terminal.modal_mode` at their documented `terminal.*` paths. Use `terminal.backend` as the selector in new configuration; `terminal.env_type` and `TERMINAL_ENV` are retained only for compatibility with older CLI configuration.
 
-For plugin backends, the plugin owns field-level defaults and any documented
-environment overrides in its config resolver. The same resolved snapshot is
-used for readiness checks and runtime construction; unknown plugin-local keys
-are preserved when Dashboard or Desktop saves another setting.
-
-Plugin authors can add a backend with
-`ctx.register_terminal_backend(BackendDefinition(...))`; see
-[Terminal Backend Plugins](/developer-guide/plugins/terminal-backend).
+To develop a backend plugin, see [Terminal Backend Plugins](/developer-guide/plugins/terminal-backend).
 
 ### Backend Overview
 
