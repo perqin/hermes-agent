@@ -188,16 +188,17 @@ def test_concurrent_builtin_registration_is_atomic(monkeypatch):
     from tools.environments.builtin_backends import register_builtin_terminal_backends
 
     registry = TerminalBackendRegistry()
-    original_get = registry.get
+    original_register_or_verify = registry.register_or_verify
     first_lookup = Barrier(2)
 
-    def synchronized_get(name):
-        definition = original_get(name)
-        if name == "local":
+    def synchronized_register_or_verify(definition):
+        if definition.name == "local":
             first_lookup.wait(timeout=5)
-        return definition
+        return original_register_or_verify(definition)
 
-    monkeypatch.setattr(registry, "get", synchronized_get)
+    monkeypatch.setattr(
+        registry, "register_or_verify", synchronized_register_or_verify
+    )
     errors = []
 
     def bootstrap():

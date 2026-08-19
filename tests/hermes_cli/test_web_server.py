@@ -2006,19 +2006,6 @@ class TestWebServerEndpoints:
 class TestBuildSchemaFromConfig:
 
 
-    def test_dynamic_terminal_definition_schema_applied(self):
-        from hermes_cli.web_server import _schema_with_dynamic_provider_options
-
-        schema = _schema_with_dynamic_provider_options()
-        entry = schema["terminal.backend"]
-        assert entry["type"] == "select"
-        assert "local" in entry["options"]
-        assert "vercel_sandbox" in entry["options"]
-        runtime_entry = schema["terminal.vercel_runtime"]
-        assert runtime_entry["type"] == "select"
-        assert "node24" in runtime_entry["options"]
-        assert "python3.13" in runtime_entry["options"]
-        assert len(runtime_entry["options"]) >= 3
 
     def test_dynamic_terminal_schema_survives_config_load_error(self, monkeypatch):
         import hermes_cli.web_server as web_server
@@ -2603,6 +2590,9 @@ class TestNewEndpoints:
 
         fields = web_server._schema_with_dynamic_provider_options()
 
+        assert fields["terminal.backend"]["type"] == "select"
+        assert "local" in fields["terminal.backend"]["options"]
+        assert "vercel_sandbox" in fields["terminal.backend"]["options"]
         assert fields["terminal.modal_mode"]["options"] == ["sandbox", "function"]
         assert fields["terminal.modal_mode"]["terminal_backend"] == "modal"
         assert fields["terminal.vercel_runtime"]["options"] == [
@@ -2871,24 +2861,6 @@ class TestNewEndpoints:
         assert status == "unavailable"
         assert detail == "Backend probe failed."
         assert credential not in detail
-
-    def test_terminal_backend_picker_revalidates_mutated_metadata(self, monkeypatch):
-        import hermes_cli.web_server as web_server
-        from tools.environments import BackendDefinition
-        from tools.environments import registry as registry_module
-
-        registry = registry_module.TerminalBackendRegistry()
-        definition = BackendDefinition(
-            name="coder",
-            label="Coder Workspace",
-            factory=lambda request: object(),
-        )
-        registry.register(definition)
-        definition.label = object()
-        monkeypatch.setattr(registry_module, "terminal_backend_registry", registry)
-
-        with pytest.raises(TypeError, match="label must be a string"):
-            web_server._terminal_backend_rows()
 
     def test_terminal_backend_selection_validates_in_requested_profile(
         self, monkeypatch

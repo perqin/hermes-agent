@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 
@@ -24,7 +22,78 @@ def test_backend_definition_validates_public_registration_contract():
         BackendDefinition(name="coder", factory=_factory, availability_check=None)
 
 
-def test_backend_factory_request_carries_host_and_backend_configuration():
+@pytest.mark.parametrize("field", ["label", "description", "install_hint"])
+def test_backend_definition_rejects_non_string_picker_metadata(field):
+    from tools.environments import BackendDefinition
+
+    with pytest.raises(TypeError, match=rf"{field} must be a string"):
+        BackendDefinition(
+            name="invalid",
+            factory=_factory,
+            **{field: object()},
+        )
+
+
+@pytest.mark.parametrize(
+    ("config_schema", "error_type", "match"),
+    [
+        ({"token": "secret"}, TypeError, "must be a mapping"),
+        (
+            {"token": {"type": "secret", "config_key": 7}},
+            TypeError,
+            "config_key must be a non-empty string",
+        ),
+        (
+            {"__proto__.polluted": {"type": "string"}},
+            ValueError,
+            "unsafe path segment",
+        ),
+        (
+            {
+                "token": {
+                    "type": "secret",
+                    "config_key": "terminal.backends.invalid.constructor.value",
+                }
+            },
+            ValueError,
+            "unsafe path segment",
+        ),
+        (
+            {"token": {"type": "unsupported"}},
+            ValueError,
+            "unsupported type",
+        ),
+        (
+            {"mode": {"type": "select", "options": "not-a-list"}},
+            TypeError,
+            "options must be a list of strings",
+        ),
+        (
+            {"mode": {"type": "select", "options": ["safe", 7]}},
+            TypeError,
+            "options must be a list of strings",
+        ),
+        (
+            {"token": {"type": "string", "metadata": object()}},
+            TypeError,
+            "JSON-serializable",
+        ),
+    ],
+)
+def test_backend_definition_rejects_invalid_config_schema_entry(
+    config_schema, error_type, match
+):
+    from tools.environments import BackendDefinition
+
+    with pytest.raises(error_type, match=match):
+        BackendDefinition(
+            name="invalid",
+            factory=_factory,
+            config_schema=config_schema,
+        )
+
+
+def test_backend_factory_request_carries_runtime_configuration():
     from tools.environments import BackendFactoryRequest
 
     request = BackendFactoryRequest(
@@ -34,10 +103,7 @@ def test_backend_factory_request_carries_host_and_backend_configuration():
         timeout=30,
         image="python:3.13",
         host_cwd="/host/project",
-        profile_name="work",
-        hermes_home=Path("/home/example/.hermes"),
         terminal_config={"container_cpu": 2},
-        task_overrides={"timeout": 30},
         backend_config={"workspace": "example"},
     )
 
@@ -47,10 +113,7 @@ def test_backend_factory_request_carries_host_and_backend_configuration():
     assert request.timeout == 30
     assert request.image == "python:3.13"
     assert request.host_cwd == "/host/project"
-    assert request.profile_name == "work"
-    assert request.hermes_home == Path("/home/example/.hermes")
     assert request.terminal_config == {"container_cpu": 2}
-    assert request.task_overrides == {"timeout": 30}
     assert request.backend_config == {"workspace": "example"}
 
     request.cwd = "/other"
@@ -61,7 +124,6 @@ def test_backend_contract_mappings_copy_top_level_and_remain_mutable():
     from tools.environments import BackendDefinition, BackendFactoryRequest
 
     terminal_config = {"container_cpu": 2}
-    task_overrides = {"timeout": 30}
     backend_config = {"workspace": "example"}
     config_schema = {"workspace": {"type": "string"}}
     diagnostic_metadata = {"docs_url": "https://example.invalid"}
@@ -69,7 +131,6 @@ def test_backend_contract_mappings_copy_top_level_and_remain_mutable():
     request = BackendFactoryRequest(
         backend_name="coder",
         terminal_config=terminal_config,
-        task_overrides=task_overrides,
         backend_config=backend_config,
     )
     definition = BackendDefinition(
@@ -80,13 +141,11 @@ def test_backend_contract_mappings_copy_top_level_and_remain_mutable():
     )
 
     terminal_config["container_cpu"] = 4
-    task_overrides["timeout"] = 60
     backend_config["workspace"] = "changed"
     config_schema["other"] = {"type": "boolean"}
     diagnostic_metadata["other"] = True
 
     assert request.terminal_config == {"container_cpu": 2}
-    assert request.task_overrides == {"timeout": 30}
     assert request.backend_config == {"workspace": "example"}
     assert definition.config_schema == {"workspace": {"type": "string"}}
     assert definition.diagnostic_metadata == {"docs_url": "https://example.invalid"}

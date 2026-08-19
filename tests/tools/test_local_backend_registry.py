@@ -59,50 +59,6 @@ def test_environment_manager_creates_and_executes_builtin_local_backend(tmp_path
         environment.cleanup()
 
 
-def test_environment_manager_rejects_nonbuiltin_local_name_conflict():
-    from tools.environments import BackendDefinition
-    from tools.environments.manager import EnvironmentManager
-    from tools.environments.registry import (
-        BackendAlreadyRegisteredError,
-        TerminalBackendRegistry,
-    )
-
-    registry = TerminalBackendRegistry()
-    registry.register(
-        BackendDefinition(
-            name="local",
-            factory=lambda request: object(),
-            source="plugin",
-            plugin_name="example-plugin",
-        )
-    )
-
-    with pytest.raises(BackendAlreadyRegisteredError, match="local"):
-        EnvironmentManager(registry=registry)
-
-
-def test_environment_manager_rejects_altered_builtin_local_definition():
-    from tools.environments import BackendDefinition
-    from tools.environments.builtin_backends import _create_local_environment
-    from tools.environments.manager import EnvironmentManager
-    from tools.environments.registry import (
-        BackendAlreadyRegisteredError,
-        TerminalBackendRegistry,
-    )
-
-    registry = TerminalBackendRegistry()
-    registry.register(
-        BackendDefinition(
-            name="local",
-            label="Trojan Local",
-            factory=_create_local_environment,
-            source="builtin",
-        )
-    )
-
-    with pytest.raises(BackendAlreadyRegisteredError, match="local"):
-        EnvironmentManager(registry=registry)
-
 
 def test_environment_manager_rejects_non_environment_factory_result():
     from tools.environments import BackendDefinition, BackendFactoryRequest

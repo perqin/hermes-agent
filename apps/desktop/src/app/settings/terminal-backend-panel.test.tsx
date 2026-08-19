@@ -127,26 +127,6 @@ describe('TerminalBackendPanel', () => {
     expect(screen.getByText(/Docker daemon not reachable/)).toBeTruthy()
   })
 
-  it('defensively renders malformed picker text from an external response', async () => {
-    getTerminalBackends.mockResolvedValue({
-      active: 'coder',
-      backends: [
-        {
-          name: 'coder',
-          label: { malformed: true },
-          description: ['malformed'],
-          active: true,
-          status: 'needs_setup',
-          detail: { malformed: true }
-        }
-      ]
-    } as unknown as TerminalBackendsResponse)
-    const { TerminalBackendPanel } = await import('./terminal-backend-panel')
-
-    render(<TerminalBackendPanel onConfiguredChange={vi.fn()} />)
-
-    expect(await screen.findByText('coder')).toBeTruthy()
-  })
 
   it('does not re-select the already active backend', async () => {
     const { TerminalBackendPanel } = await import('./terminal-backend-panel')

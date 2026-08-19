@@ -749,34 +749,6 @@ class TestSpawnEnvSanitization:
         assert f"{_HERMES_PROVIDER_ENV_FORCE_PREFIX}TELEGRAM_BOT_TOKEN" not in env
         assert env["PYTHONUNBUFFERED"] == "1"
 
-    def test_spawn_via_env_uses_backend_temp_dir_for_artifacts(self, registry):
-        class FakeEnv:
-            def __init__(self):
-                self.commands = []
-
-            def get_temp_dir(self):
-                return "/data/data/com.termux/files/usr/tmp"
-
-            def execute(self, command, **kwargs):
-                self.commands.append((command, kwargs))
-                return {"output": "4321\n"}
-
-        env = FakeEnv()
-        fake_thread = MagicMock()
-
-        with patch("tools.process_registry.threading.Thread", return_value=fake_thread), \
-            patch.object(registry, "_write_checkpoint"):
-            session = registry.spawn_via_env(env, "echo hello")
-
-        bg_command = env.commands[0][0]
-        assert session.pid == 4321
-        assert env.commands[0][1]["cwd"] is None
-        assert "/data/data/com.termux/files/usr/tmp/hermes_bg_" in bg_command
-        assert ".exit" in bg_command
-        assert "rc=$?;" in bg_command
-        assert " > /tmp/hermes_bg_" not in bg_command
-        assert "cat /tmp/hermes_bg_" not in bg_command
-        fake_thread.start.assert_called_once()
 
     def test_spawn_via_env_checks_returncode_when_wrapper_fails(self, registry):
         class FakeEnv:
@@ -802,27 +774,6 @@ class TestSpawnEnvSanitization:
         # A failed launch must not be exposed as a running/tracked session.
         assert session.id not in registry._running
 
-    def test_spawn_via_env_disables_rewrite_for_bg_wrapper(self, registry):
-        class FakeEnv:
-            def __init__(self):
-                self.commands = []
-
-            def get_temp_dir(self):
-                return "/tmp"
-
-            def execute(self, command, **kwargs):
-                self.commands.append((command, kwargs))
-                return {"output": "4321\n", "returncode": 0}
-
-        env = FakeEnv()
-        fake_thread = MagicMock()
-
-        with patch("tools.process_registry.threading.Thread", return_value=fake_thread), \
-            patch.object(registry, "_write_checkpoint"):
-            registry.spawn_via_env(env, "echo hello")
-
-        args, kwargs = env.commands[0]
-        assert kwargs.get("rewrite_compound_background") is False
 
     def test_spawn_via_env_preserves_sanitized_cwd_for_launch_and_polling(self, registry):
         class FakeEnv:

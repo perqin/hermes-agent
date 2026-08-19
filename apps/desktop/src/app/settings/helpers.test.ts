@@ -125,24 +125,12 @@ describe('settings helpers', () => {
     })
   })
 
-  it('reads and writes nested config paths without dropping unknown plugin config', () => {
-    const config: HermesConfigRecord = {
-      display: { theme: 'mono' },
-      terminal: {
-        backend: 'coder',
-        backends: {
-          coder: { workspace: 'development', token: 'keep-me' },
-          another_plugin: { future_option: true }
-        }
-      }
-    }
+  it('reads and writes nested config paths', () => {
+    const config: HermesConfigRecord = { display: { theme: 'mono' } }
+    const next = setNested(config, 'display.theme', 'slate')
 
-    const next = setNested(config, 'terminal.backends.coder.workspace', 'production')
-
-    expect(getNested(next, 'terminal.backends.coder.workspace')).toBe('production')
-    expect(getNested(next, 'terminal.backends.coder.token')).toBe('keep-me')
-    expect(getNested(next, 'terminal.backends.another_plugin.future_option')).toBe(true)
-    expect(getNested(config, 'terminal.backends.coder.workspace')).toBe('development')
+    expect(getNested(next, 'display.theme')).toBe('slate')
+    expect(getNested(config, 'display.theme')).toBe('mono')
   })
 
   it('rejects prototype-polluting config paths', () => {

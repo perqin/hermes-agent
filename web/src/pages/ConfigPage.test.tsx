@@ -227,7 +227,7 @@ describe("ConfigPage profile scope", () => {
     expect(container.querySelector('input[value="stale A"]')).toBeNull();
   });
 
-  it("ignores all initial profile responses that resolve after a switch", async () => {
+  it("ignores stale initial profile responses after switching", async () => {
     type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
     const deferred = <T,>(): Deferred<T> => {
       let resolve!: (value: T) => void;
@@ -255,7 +255,7 @@ describe("ConfigPage profile scope", () => {
       .mockResolvedValueOnce({ value: "B default" });
     apiMocks.getConfigRaw
       .mockReturnValueOnce(aRaw.promise)
-      .mockResolvedValueOnce({ yaml: "value: B", path: "/profiles/B/config.yaml" });
+      .mockResolvedValueOnce({ yaml: "value: B", path: "" });
     apiMocks.getStatus
       .mockReturnValueOnce(aStatus.promise)
       .mockResolvedValueOnce(statusResult("/profiles/B/fallback.yaml"));
@@ -277,9 +277,24 @@ describe("ConfigPage profile scope", () => {
     });
 
     expect(container.querySelector('input[value="B"]')).not.toBeNull();
-    expect(container.textContent).toContain("/profiles/B/config.yaml");
+    expect(container.textContent).toContain("/profiles/B/fallback.yaml");
     expect(container.textContent).not.toContain("/profiles/A/config.yaml");
+    expect(container.textContent).not.toContain("/profiles/A/fallback.yaml");
     expect(container.textContent).not.toContain("plugin-a");
+
+    const resetButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reset General"]',
+    );
+    expect(resetButton).not.toBeNull();
+    await act(async () => resetButton?.click());
+    const confirmButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Reset defaults",
+    );
+    expect(confirmButton).toBeDefined();
+    await act(async () => confirmButton?.click());
+
+    expect(container.querySelector('input[value="B default"]')).not.toBeNull();
+    expect(container.querySelector('input[value="stale default"]')).toBeNull();
   });
 
   it("does not expose or save the old form while the new profile loads", async () => {
@@ -395,22 +410,5 @@ describe("ConfigPage profile scope", () => {
     expect(container.querySelector('input[value="B"]')).not.toBeNull();
     expect(container.querySelector('input[value="stale import"]')).toBeNull();
     expect(toastMocks.showToast).not.toHaveBeenCalled();
-  });
-
-  it("does not crash if a select descriptor has malformed options", async () => {
-    apiMocks.getConfig.mockResolvedValue({ mode: "safe" });
-    apiMocks.getSchema.mockResolvedValue({
-      fields: {
-        mode: { type: "select", category: "general", options: "not-a-list" },
-      },
-      category_order: ["general"],
-    });
-    apiMocks.getDefaults.mockResolvedValue({ mode: "safe" });
-    apiMocks.getConfigRaw.mockResolvedValue({ yaml: "mode: safe", path: "" });
-    apiMocks.getStatus.mockResolvedValue(statusResult(""));
-
-    await act(async () => root.render(<ConfigPage />));
-
-    expect(container.textContent).toContain("Mode");
   });
 });

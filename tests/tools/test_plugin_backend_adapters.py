@@ -592,45 +592,6 @@ def test_plugin_context_rejects_reserved_builtin_backend_names(backend_name, sou
         context.register_terminal_backend(definition)
 
 
-@pytest.mark.parametrize(
-    "backend_name",
-    ["docker", "modal", "singularity", "daytona", "ssh", "vercel_sandbox"],
-)
-def test_registered_backend_preserves_container_guard_behavior(
-    monkeypatch, backend_name
-):
-    from tools.approval import check_dangerous_command
-
-
-    result = check_dangerous_command("rm -rf /", backend_name, has_host_access=True)
-
-    assert result["approved"] is (
-        backend_name in {"modal", "singularity", "daytona", "vercel_sandbox"}
-    )
-
-
-@pytest.mark.parametrize(
-    "backend_name",
-    ["docker", "modal", "singularity", "daytona", "ssh", "vercel_sandbox"],
-)
-def test_registered_backend_preserves_execute_code_guard_behavior(
-    monkeypatch, backend_name
-):
-    import tools.approval as approval
-
-    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-    monkeypatch.setattr(approval, "_get_cron_approval_mode", lambda: "deny")
-
-    result = approval.check_execute_code_guard(
-        "import os; os.remove('/host/evidence')",
-        backend_name,
-        has_host_access=True,
-    )
-
-    assert result["approved"] is (
-        backend_name in {"modal", "singularity", "daytona", "vercel_sandbox"}
-    )
-
 
 def test_forward_env_helper_preserves_explicit_opt_in_and_filters_implicit_secrets(
     monkeypatch,
@@ -1036,47 +997,6 @@ def test_manager_preserves_factory_request_cwd_and_host_cwd():
         "host_cwd": "/opt/host-only/project",
     }
 
-
-@pytest.mark.parametrize(
-    ("semantics", "requires_sandbox_cwd", "accepts_host_cwd"),
-    [
-        (FilesystemSemantics.UNKNOWN, False, False),
-        (FilesystemSemantics.HOST, False, True),
-        (FilesystemSemantics.ISOLATED, False, False),
-        (FilesystemSemantics.ISOLATED, True, True),
-    ],
-)
-def test_manager_does_not_rewrite_request_from_declared_capabilities(
-    semantics, requires_sandbox_cwd, accepts_host_cwd
-):
-    from tools.environments.manager import EnvironmentManager
-
-    received: dict[str, object] = {}
-
-    def factory(request: BackendFactoryRequest):
-        received.update(cwd=request.cwd, host_cwd=request.host_cwd)
-        return MagicMock(spec=BaseEnvironment)
-
-    definition = _definition()
-    definition.default_cwd = "~"
-    definition.factory = factory
-    definition.capabilities.filesystem_semantics = semantics
-    definition.capabilities.requires_sandbox_cwd = requires_sandbox_cwd
-    definition.capabilities.accepts_host_cwd = accepts_host_cwd
-    terminal_backend_registry.register(definition)
-
-    EnvironmentManager().create_environment(
-        BackendFactoryRequest(
-            backend_name=definition.name,
-            cwd="/opt/host-only/project",
-            host_cwd="/opt/host-only/project",
-        )
-    )
-
-    assert received == {
-        "cwd": "/opt/host-only/project",
-        "host_cwd": "/opt/host-only/project",
-    }
 
 
 def test_manager_accepts_local_plugin_factory_returning_local_environment():

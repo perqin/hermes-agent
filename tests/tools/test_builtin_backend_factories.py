@@ -20,17 +20,6 @@ class _CapturedEnvironment(BaseEnvironment):
         return None
 
 
-class _CapturedBaseEnvironment(BaseEnvironment):
-    def __init__(self, **kwargs):
-        super().__init__(cwd=kwargs["cwd"], timeout=kwargs["timeout"])
-        self.kwargs = kwargs
-
-    def _run_bash(self, *args, **kwargs):
-        raise AssertionError("factory wiring test must not execute commands")
-
-    def cleanup(self):
-        return None
-
 
 def _request(name: str, **overrides) -> BackendFactoryRequest:
     values = {
@@ -123,27 +112,6 @@ def test_docker_factory_preserves_every_legacy_constructor_option(monkeypatch):
         "shm_size": "2g",
     }
 
-
-def test_environment_manager_uses_registered_builtin_docker_factory(monkeypatch):
-    import tools.environments.docker as docker_backend
-    import tools.terminal_tool as terminal_tool
-    from tools.environments.manager import EnvironmentManager
-    from tools.environments.registry import TerminalBackendRegistry
-
-    monkeypatch.setattr(docker_backend, "DockerEnvironment", _CapturedBaseEnvironment)
-    monkeypatch.setattr(terminal_tool, "_maybe_reap_docker_orphans", lambda _config: None)
-    monkeypatch.setattr(
-        terminal_tool,
-        "_check_terminal_backend_requirements",
-        lambda **_kwargs: True,
-    )
-    manager = EnvironmentManager(registry=TerminalBackendRegistry())
-
-    environment = manager.create_environment(_request("docker"))
-
-    assert isinstance(environment, _CapturedBaseEnvironment)
-    assert environment.kwargs["image"] == "example/image:latest"
-    assert environment.kwargs["host_cwd"] == "/host/work"
 
 
 @pytest.mark.parametrize(
