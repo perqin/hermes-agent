@@ -761,16 +761,16 @@ async def select_terminal_backend(
     allowed — the picker shows guidance instead of blocking, matching the CLI.
     """
     backend = (body.backend or "").strip().lower()
-    valid_names = _terminal_backend_names()
-    if backend not in valid_names:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown terminal backend: {body.backend!r}. "
-            f"Use one of: {', '.join(sorted(valid_names))}",
-        )
 
     def _run():
         with _profile_scope(body.profile or profile):
+            valid_names = _terminal_backend_names()
+            if backend not in valid_names:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown terminal backend: {body.backend!r}. "
+                    f"Use one of: {', '.join(sorted(valid_names))}",
+                )
             with _CONFIG_MUTATION_LOCK:
                 config = load_config()
                 terminal_cfg = config.setdefault("terminal", {})

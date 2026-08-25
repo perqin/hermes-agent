@@ -2465,6 +2465,228 @@ class TestConfigRoundTrip:
                 mismatches.append(f"{key}: expected list, got {type(val).__name__}")
         assert not mismatches, "Type mismatches:\n" + "\n".join(mismatches)
 
+    def test_schema_includes_plugin_terminal_backend_config_fields(self):
+        from agent import terminal_env_registry
+        from agent.terminal_env_provider import TerminalEnvironmentProvider
+
+        class ConfiguredProvider(TerminalEnvironmentProvider):
+            name = "configured_box"
+
+            def is_available(self):
+                return True
+
+            def get_config_schema(self):
+                return {
+                    "workspace": {
+                        "type": "string",
+                        "description": "Workspace name",
+                    },
+                    "token": {
+                        "type": "secret",
+                        "description": "Workspace token",
+                    },
+                }
+
+            def create_environment(self, **kwargs):
+                return object()
+
+        provider = ConfiguredProvider()
+        terminal_env_registry.register_provider(provider)
+        try:
+            response = self.client.get("/api/config/schema")
+        finally:
+            terminal_env_registry.restore_registration(
+                provider.name, provider, None
+            )
+
+        assert response.status_code == 200
+        fields = response.json()["fields"]
+        assert fields["terminal.backends.configured_box.workspace"] == {
+            "type": "string",
+            "description": "Workspace name",
+            "category": "terminal",
+            "terminal_backend": "configured_box",
+        }
+        assert fields["terminal.backends.configured_box.token"]["type"] == "secret"
+        assert fields["terminal.backends.configured_box.token"]["terminal_backend"] == "configured_box"
+
+    def test_schema_does_not_publish_plugin_secret_defaults(self):
+        from agent import terminal_env_registry
+        from agent.terminal_env_provider import TerminalEnvironmentProvider
+
+        class LeakyProvider(TerminalEnvironmentProvider):
+            name = "leaky_box"
+
+            def is_available(self):
+                return True
+
+            def get_config_schema(self):
+                return {
+                    "token": {
+                        "type": "secret",
+                        "default": "TOP-SECRET",
+                    }
+                }
+
+            def create_environment(self, **kwargs):
+                return object()
+
+        provider = LeakyProvider()
+        terminal_env_registry.register_provider(provider)
+        try:
+            response = self.client.get("/api/config/schema")
+        finally:
+            terminal_env_registry.restore_registration(provider.name, provider, None)
+
+        assert response.status_code == 200
+        assert "terminal.backends.leaky_box.token" not in response.json()["fields"]
+        assert "TOP-SECRET" not in response.text
+
+    def test_schema_failure_does_not_log_provider_exception_value(self, caplog):
+        from agent import terminal_env_registry
+        from agent.terminal_env_provider import TerminalEnvironmentProvider
+
+        class LeakyProvider(TerminalEnvironmentProvider):
+            name = "leaky_box"
+
+            def is_available(self):
+                return True
+
+            def get_config_schema(self):
+                raise RuntimeError("TOP-SECRET")
+
+            def create_environment(self, **kwargs):
+                return object()
+
+        provider = LeakyProvider()
+        terminal_env_registry.register_provider(provider)
+        try:
+            with caplog.at_level("WARNING"):
+                response = self.client.get("/api/config/schema")
+        finally:
+            terminal_env_registry.restore_registration(provider.name, provider, None)
+
+        assert response.status_code == 200
+        assert "TOP-SECRET" not in caplog.text
+
+    def test_terminal_backend_probe_receives_resolved_provider_config(self):
+        from agent import terminal_env_registry
+        from agent.terminal_env_provider import TerminalEnvironmentProvider
+        from hermes_cli.config import save_config
+
+        received = {}
+
+        class ConfiguredProvider(TerminalEnvironmentProvider):
+            name = "configured_box"
+
+            def is_available(self):
+                return True
+
+            def resolve_config(self, config):
+                return {**config, "region": "us-east"}
+
+            def probe_with_config(self, config):
+                received.update(config)
+                return ("ready", config["workspace"])
+
+            def create_environment(self, **kwargs):
+                return object()
+
+        save_config(
+            {
+                "terminal": {
+                    "backend": "configured_box",
+                    "backends": {"configured_box": {"workspace": "development"}},
+                }
+            }
+        )
+        provider = ConfiguredProvider()
+        terminal_env_registry.register_provider(provider)
+        try:
+            response = self.client.get("/api/tools/terminal/backends")
+        finally:
+            terminal_env_registry.restore_registration(provider.name, provider, None)
+
+        assert response.status_code == 200
+        row = next(item for item in response.json()["backends"] if item["name"] == provider.name)
+        assert row["status"] == "ready"
+        assert row["detail"] == "development"
+        assert received == {"workspace": "development", "region": "us-east"}
+
+    def test_terminal_backend_probe_rejects_malformed_runtime_config(self, monkeypatch):
+        from agent import terminal_env_registry
+        from agent.terminal_env_provider import TerminalEnvironmentProvider
+        import hermes_cli.config as config_module
+
+        probed = False
+
+        class ConfiguredProvider(TerminalEnvironmentProvider):
+            name = "configured_box"
+
+            def is_available(self):
+                return True
+
+            def probe_with_config(self, config):
+                nonlocal probed
+                probed = True
+                return ("ready", "must-not-run")
+
+            def create_environment(self, **kwargs):
+                return object()
+
+        monkeypatch.setattr(
+            config_module,
+            "read_user_config_raw",
+            lambda: {"terminal": {"backends": ["malformed-secret"]}},
+        )
+        provider = ConfiguredProvider()
+        terminal_env_registry.register_provider(provider)
+        try:
+            response = self.client.get("/api/tools/terminal/backends")
+        finally:
+            terminal_env_registry.restore_registration(provider.name, provider, None)
+
+        assert response.status_code == 200
+        row = next(item for item in response.json()["backends"] if item["name"] == provider.name)
+        assert row["status"] == "unavailable"
+        assert row["detail"] == "Provider configuration could not be loaded."
+        assert "malformed-secret" not in response.text
+        assert probed is False
+
+    def test_terminal_backend_selection_validates_inside_requested_profile(self, monkeypatch):
+        from contextlib import contextmanager
+        import hermes_cli.web_routers.tools as tools_router
+
+        active_scopes = []
+        observed_scopes = []
+        saved = []
+
+        @contextmanager
+        def profile_scope(profile):
+            active_scopes.append(profile)
+            try:
+                yield
+            finally:
+                active_scopes.pop()
+
+        def terminal_backend_names():
+            observed_scopes.append(tuple(active_scopes))
+            return {"local", "profile_plugin"} if active_scopes == ["other"] else {"local"}
+
+        monkeypatch.setattr(tools_router, "_profile_scope", profile_scope)
+        monkeypatch.setattr(tools_router, "_terminal_backend_names", terminal_backend_names)
+        monkeypatch.setattr(tools_router, "load_config", lambda: {"terminal": {"backend": "local"}})
+        monkeypatch.setattr(tools_router, "save_config", lambda config: saved.append(config))
+
+        response = self.client.put(
+            "/api/tools/terminal/backend?profile=other",
+            json={"backend": "profile_plugin"},
+        )
+
+        assert response.status_code == 200
+        assert observed_scopes == [("other",)]
+        assert saved == [{"terminal": {"backend": "profile_plugin"}}]
+
     def test_desktop_terminal_font_round_trip_preserves_terminal_config(self):
         """The Appearance picker persists a font without replacing sibling settings."""
         from hermes_cli.config import load_config

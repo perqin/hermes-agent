@@ -1619,6 +1619,31 @@ def _schema_with_dynamic_provider_options() -> Dict[str, Dict[str, Any]]:
         if plugin_names:
             merge("terminal.backend", [*tb_entry["options"], *plugin_names])
 
+    try:
+        from agent.terminal_env_registry import list_providers as _list_terminal_providers
+
+        for provider in _list_terminal_providers():
+            try:
+                provider_name = provider.name.strip().lower()
+                if not re.fullmatch(r"[a-z][a-z0-9_-]*", provider_name):
+                    raise ValueError(f"unsafe terminal provider name {provider_name!r}")
+                for field_name, field_schema in provider.validated_config_schema().items():
+                    full_key = f"terminal.backends.{provider_name}.{field_name}"
+                    if full_key in CONFIG_SCHEMA or full_key in overlay:
+                        raise ValueError(f"duplicate terminal provider config field {full_key!r}")
+                    overlay[full_key] = {
+                        **field_schema,
+                        "category": "terminal",
+                        "terminal_backend": provider_name,
+                    }
+            except Exception:
+                _log.warning(
+                    "Ignoring invalid config schema from terminal provider %r",
+                    getattr(provider, "name", "<unknown>"),
+                )
+    except Exception:
+        _log.debug("Could not enumerate terminal provider config schemas")
+
     if not overlay:
         return CONFIG_SCHEMA
 
@@ -15594,12 +15619,23 @@ def _probe_terminal_backend(name: str, terminal_cfg: dict) -> tuple:
 
             provider = get_provider(name)
             if provider is not None:
-                return provider.probe()
+                try:
+                    from tools.terminal_tool import _resolve_plugin_backend_config
+
+                    backend_config = _resolve_plugin_backend_config(provider)
+                    return provider.probe_with_config(backend_config)
+                except Exception:
+                    _log.warning(
+                        "Terminal provider %s configuration could not be loaded for probing",
+                        name,
+                    )
+                    return ("unavailable", "Provider configuration could not be loaded.")
         except Exception:
             pass
         return ("unavailable", f"Unknown backend: {name}")
-    except Exception as exc:  # pragma: no cover — belt-and-braces guard
-        return ("unavailable", f"Probe failed: {exc}")
+    except Exception:  # pragma: no cover — belt-and-braces guard
+        _log.warning("Terminal backend %s probe failed", name)
+        return ("unavailable", "Backend probe failed.")
 
 
 

@@ -1870,6 +1870,48 @@ def _container_config_from_config(config: Dict[str, Any]) -> dict:
     }
 
 
+def _resolve_plugin_backend_config(provider) -> Dict[str, Any]:
+    """Resolve one provider's profile-scoped ``terminal.backends`` config."""
+    from collections.abc import Mapping
+    from copy import deepcopy
+
+    from hermes_cli.config import read_user_config_raw
+
+    raw_config = read_user_config_raw(require_mapping=True)
+    if not isinstance(raw_config, Mapping):
+        raise TypeError("Hermes profile config must be a mapping")
+
+    terminal_config = raw_config.get("terminal", {})
+    if terminal_config is None:
+        terminal_config = {}
+    if not isinstance(terminal_config, Mapping):
+        raise TypeError("terminal config must be a mapping")
+
+    backends = terminal_config.get("backends", {})
+    if backends is None:
+        backends = {}
+    if not isinstance(backends, Mapping):
+        raise TypeError("terminal.backends config must be a mapping")
+
+    provider_name = provider.name.strip().lower()
+    configured = backends.get(provider_name, {})
+    if configured is None:
+        configured = {}
+    if not isinstance(configured, Mapping):
+        raise TypeError(f"terminal.backends.{provider_name} config must be a mapping")
+    raw_backend_config = deepcopy(dict(configured))
+
+    return provider.validated_config(raw_backend_config)
+
+
+class PluginTerminalEnvironmentError(RuntimeError):
+    """Sanitized plugin configuration/factory failure boundary."""
+
+    def __init__(self, provider_name: str):
+        self.provider_name = provider_name
+        super().__init__(f"Plugin terminal backend {provider_name!r} could not be initialized")
+
+
 def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                         ssh_config: dict = None, container_config: dict = None,
                         local_config: dict = None,
@@ -2058,17 +2100,22 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     else:
         provider = _get_plugin_env_provider(env_type)
         if provider is not None:
-            env_obj = provider.create_environment(
-                cwd=cwd, timeout=timeout, task_id=task_id,
-                image=image, container_config=cc,
-            )
-            # Stamp the backend name so path-resolution and progress surfaces
-            # can identify plugin backends without class-name sniffing.
             try:
-                env_obj._hermes_backend_name = provider.name.strip().lower()
-            except AttributeError:
-                pass  # test doubles may reject attributes
-            return env_obj
+                backend_config = _resolve_plugin_backend_config(provider)
+                env_obj = provider.create_environment(
+                    cwd=cwd, timeout=timeout, task_id=task_id,
+                    image=image, container_config=cc,
+                    backend_config=backend_config,
+                )
+                # Stamp the backend name so path-resolution and progress surfaces
+                # can identify plugin backends without class-name sniffing.
+                try:
+                    env_obj._hermes_backend_name = provider.name.strip().lower()
+                except AttributeError:
+                    pass  # test doubles may reject attributes
+                return env_obj
+            except Exception:
+                raise PluginTerminalEnvironmentError(provider.name) from None
         try:
             from agent.terminal_env_registry import plugin_backend_names
 
@@ -2257,6 +2304,12 @@ def ensure_task_env(task_id: Optional[str] = None):
                 task_id=effective_task_id,
                 host_cwd=_resolve_task_host_cwd(config, task_id),
             )
+        except PluginTerminalEnvironmentError:
+            logger.warning(
+                "Lazy plugin terminal environment init failed for task %s",
+                effective_task_id[:8],
+            )
+            return None
         except Exception as exc:  # noqa: BLE001 — best-effort bring-up
             logger.warning(
                 "Lazy %s environment init failed for task %s: %s",
@@ -3808,6 +3861,15 @@ def terminal_tool(
             "error": f"Terminal backend degraded: {e.reason}",
         }, ensure_ascii=False)
 
+    except PluginTerminalEnvironmentError:
+        logger.error("Plugin terminal backend initialization failed")
+        return json.dumps({
+            "output": "",
+            "exit_code": -1,
+            "error": "Plugin terminal backend could not be initialized.",
+            "status": "error",
+        }, ensure_ascii=False)
+
     except Exception as e:
         import traceback
         tb_str = traceback.format_exc()
@@ -3849,6 +3911,7 @@ def _evict_environment_for_task(task_id: Optional[str]) -> None:
 
 def check_terminal_requirements() -> bool:
     """Check if all requirements for the terminal tool are met."""
+    env_type = os.getenv("TERMINAL_ENV", "local").strip().lower()
     try:
         config = _get_env_config()
         env_type = config["env_type"]
@@ -3952,15 +4015,23 @@ def check_terminal_requirements() -> bool:
         else:
             provider = _get_plugin_env_provider(env_type)
             if provider is not None:
-                return bool(provider.check_requirements(config))
+                provider_config = dict(config)
+                provider_config["backend_config"] = _resolve_plugin_backend_config(provider)
+                return bool(provider.check_requirements(provider_config))
             logger.error(
                 "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
                 "modal, daytona, vercel_sandbox, ssh, or a plugin-registered backend.",
                 env_type,
             )
             return False
-    except Exception as e:
-        logger.error("Terminal requirements check failed: %s", e, exc_info=True)
+    except Exception as exc:
+        if env_type in {
+            "local", "docker", "singularity", "modal", "managed_modal",
+            "daytona", "vercel_sandbox", "ssh",
+        }:
+            logger.error("Terminal requirements check failed: %s", exc)
+        else:
+            logger.error("Terminal requirements check failed for backend '%s'", env_type)
         return False
 
 

@@ -66,7 +66,21 @@ sniffing.
 from __future__ import annotations
 
 import abc
+from collections.abc import Mapping
+from copy import deepcopy
+import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
+
+
+_CONFIG_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_UNSAFE_CONFIG_PATH_SEGMENTS = frozenset({"__proto__", "constructor", "prototype"})
+_DASHBOARD_CONFIG_FIELD_TYPES = frozenset(
+    {"boolean", "list", "number", "secret", "select", "string", "text"}
+)
+_SECRET_VALUE_METADATA_KEYS = frozenset(
+    {"const", "default", "example", "examples", "options", "value"}
+)
 
 
 class TerminalEnvironmentProvider(abc.ABC):
@@ -144,8 +158,10 @@ class TerminalEnvironmentProvider(abc.ABC):
     def check_requirements(self, config: Dict[str, Any]) -> bool:
         """Full requirements check for :func:`check_terminal_requirements`.
 
-        ``config`` is the merged terminal env config dict. Default defers to
-        :meth:`is_available`. Log actionable errors before returning False.
+        ``config`` is the merged terminal env config dict. When provider-owned
+        config is available, its resolved snapshot is included at
+        ``config["backend_config"]``. Default defers to :meth:`is_available`.
+        Log actionable errors before returning False.
         """
         return self.is_available()
 
@@ -159,6 +175,10 @@ class TerminalEnvironmentProvider(abc.ABC):
         if self.is_available():
             return ("ready", "")
         return ("needs_setup", f"{self.display_name} is not configured.")
+
+    def probe_with_config(self, config: Mapping[str, Any]) -> Tuple[str, str]:
+        """Config-aware picker probe; defaults to the legacy no-argument probe."""
+        return self.probe()
 
     def setup_instructions(self) -> List[str]:
         """Lines printed by ``hermes setup`` after this backend is selected.
@@ -186,6 +206,93 @@ class TerminalEnvironmentProvider(abc.ABC):
             ok = False
         detail = "(configured)" if ok else "(not configured — see setup instructions)"
         return [(ok, f"{self.display_name} backend", detail)]
+
+    # ------------------------------------------------------------------
+    # Provider-owned configuration
+    # ------------------------------------------------------------------
+
+    def get_config_schema(self) -> Dict[str, Dict[str, Any]]:
+        """Dashboard schema for config stored below ``terminal.backends.<name>``.
+
+        Keys are backend-local dotted paths. Supported field types are
+        ``string``, ``text``, ``secret``, ``number``, ``boolean``, ``list``,
+        and ``select``. The default is no provider-specific configuration.
+        """
+        return {}
+
+    def validated_config_schema(self) -> Dict[str, Dict[str, Any]]:
+        """Return a validated, JSON-safe snapshot of ``get_config_schema``."""
+        raw_schema = self.get_config_schema()
+        if not isinstance(raw_schema, Mapping):
+            raise TypeError("terminal provider config schema must be a mapping")
+
+        schema: Dict[str, Dict[str, Any]] = {}
+        for key, raw_entry in raw_schema.items():
+            if not isinstance(key, str) or not key:
+                raise TypeError("terminal provider config schema keys must be non-empty strings")
+            segments = key.split(".")
+            if any(
+                not _CONFIG_PATH_SEGMENT_RE.fullmatch(segment)
+                or segment in _UNSAFE_CONFIG_PATH_SEGMENTS
+                for segment in segments
+            ):
+                raise ValueError(f"terminal provider config schema key {key!r} is unsafe")
+            if not isinstance(raw_entry, Mapping):
+                raise TypeError(f"terminal provider config schema entry {key!r} must be a mapping")
+
+            entry = deepcopy(dict(raw_entry))
+            if any(not isinstance(metadata_key, str) for metadata_key in entry):
+                raise TypeError(
+                    f"terminal provider config schema entry {key!r} metadata keys must be strings"
+                )
+            field_type = entry.get("type", "string")
+            if field_type not in _DASHBOARD_CONFIG_FIELD_TYPES:
+                raise ValueError(
+                    f"terminal provider config schema entry {key!r} has unsupported type {field_type!r}"
+                )
+            entry["type"] = field_type
+            if field_type == "secret":
+                forbidden = sorted(_SECRET_VALUE_METADATA_KEYS.intersection(entry))
+                if forbidden:
+                    raise ValueError(
+                        f"secret config schema entry {key!r} cannot include value-bearing metadata: "
+                        + ", ".join(forbidden)
+                    )
+            options = entry.get("options")
+            if field_type == "select" and (
+                not isinstance(options, list)
+                or any(not isinstance(option, str) for option in options)
+            ):
+                raise TypeError(
+                    f"terminal provider config schema entry {key!r} options must be a list of strings"
+                )
+            try:
+                json.dumps(entry, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"terminal provider config schema entry {key!r} must be JSON-serializable"
+                ) from exc
+            schema[key] = entry
+        return schema
+
+    def resolve_config(self, config: Mapping[str, Any]) -> Dict[str, Any]:
+        """Resolve a defensive backend-local profile config snapshot.
+
+        Providers may override this to apply defaults and environment/secret
+        fallbacks. Core passes the returned mapping to ``create_environment``
+        as ``backend_config``.
+        """
+        return deepcopy(dict(config))
+
+    def validated_config(self, config: Mapping[str, Any]) -> Dict[str, Any]:
+        """Resolve and defensively snapshot backend-local runtime config."""
+        raw_snapshot = deepcopy(dict(config))
+        resolved = self.resolve_config(deepcopy(raw_snapshot))
+        if not isinstance(resolved, Mapping):
+            raise TypeError(
+                f"Terminal provider {self.name!r} resolve_config() must return a mapping"
+            )
+        return deepcopy(dict(resolved))
 
     # ------------------------------------------------------------------
     # The factory
@@ -216,6 +323,9 @@ class TerminalEnvironmentProvider(abc.ABC):
             container_config: Resource config dict (``container_cpu``,
                 ``container_memory``, ``container_disk``,
                 ``container_persistent``) when :attr:`is_container` is True.
+            backend_config: Resolved provider-owned config supplied through
+                ``kwargs``. Providers that consume it should declare the
+                optional keyword explicitly while retaining ``**kwargs``.
 
         Returns:
             An object satisfying the ``BaseEnvironment`` duck-typed contract.
