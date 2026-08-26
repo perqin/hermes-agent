@@ -26,7 +26,6 @@ into a per-profile scope (multiplexed gateways) or the global base map.
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from typing import Dict, List, Optional
 
@@ -49,7 +48,6 @@ _scoped_providers: Dict[str, Dict[str, TerminalEnvironmentProvider]] = {}
 _generation = 0
 _scoped_generations: Dict[str, int] = {}
 _lock = threading.Lock()
-_BACKEND_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def register_provider(
@@ -62,7 +60,7 @@ def register_provider(
 
     Raises:
         TypeError: not a TerminalEnvironmentProvider instance.
-        ValueError: invalid name or collision with a built-in backend name.
+        ValueError: empty name or collision with a built-in backend name.
     """
     if not isinstance(provider, TerminalEnvironmentProvider):
         raise TypeError(
@@ -72,12 +70,7 @@ def register_provider(
     raw_name = provider.name
     if not isinstance(raw_name, str) or not raw_name.strip():
         raise ValueError("Terminal environment provider .name must be a non-empty string")
-    name = raw_name.strip()
-    if not _BACKEND_NAME_RE.fullmatch(name):
-        raise ValueError(
-            "Terminal environment provider .name must be a lowercase identifier "
-            "matching ^[a-z][a-z0-9_]*$"
-        )
+    name = raw_name.strip().lower()
     if name in BUILTIN_BACKEND_NAMES:
         raise ValueError(
             f"Terminal backend name '{name}' is reserved for the built-in "

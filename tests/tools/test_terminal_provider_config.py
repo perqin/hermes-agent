@@ -94,14 +94,16 @@ def test_plugin_factory_fails_when_profile_config_cannot_be_read(monkeypatch):
     assert "config unreadable" not in str(exc_info.value)
 
 
-@pytest.mark.parametrize("yaml_text", ["- malformed-root-secret\n", "null\n", "false\n", "0\n", "[]\n"])
-def test_plugin_factory_rejects_non_mapping_yaml_root(tmp_path, monkeypatch, yaml_text):
+@pytest.mark.parametrize("yaml_text", ["- ignored-root-value\n", "null\n", "false\n", "0\n", "[]\n"])
+def test_plugin_factory_treats_non_mapping_yaml_root_as_empty_config(
+    tmp_path, monkeypatch, yaml_text
+):
     import hermes_cli.config as config_module
     import tools.terminal_tool as terminal_tool
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml_text, encoding="utf-8")
-    resolved = False
+    received = None
 
     class Provider(TerminalEnvironmentProvider):
         name = "configured_box"
@@ -110,8 +112,8 @@ def test_plugin_factory_rejects_non_mapping_yaml_root(tmp_path, monkeypatch, yam
             return True
 
         def resolve_config(self, config):
-            nonlocal resolved
-            resolved = True
+            nonlocal received
+            received = config
             return config
 
         def create_environment(self, **kwargs):
@@ -124,10 +126,9 @@ def test_plugin_factory_rejects_non_mapping_yaml_root(tmp_path, monkeypatch, yam
         lambda name: Provider() if name == "configured_box" else None,
     )
 
-    with pytest.raises(terminal_tool.PluginTerminalEnvironmentError) as exc_info:
-        terminal_tool._create_environment("configured_box", "", "~", 60)
-    assert "malformed-root-secret" not in str(exc_info.value)
-    assert resolved is False
+    terminal_tool._create_environment("configured_box", "", "~", 60)
+
+    assert received == {}
 
 
 def test_requirements_failure_does_not_log_provider_exception_value(monkeypatch, caplog):

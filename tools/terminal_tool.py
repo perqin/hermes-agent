@@ -1877,28 +1877,19 @@ def _resolve_plugin_backend_config(provider) -> Dict[str, Any]:
 
     from hermes_cli.config import read_user_config_raw
 
-    raw_config = read_user_config_raw(require_mapping=True)
-    if not isinstance(raw_config, Mapping):
-        raise TypeError("Hermes profile config must be a mapping")
-
+    raw_config = read_user_config_raw()
     terminal_config = raw_config.get("terminal", {})
-    if terminal_config is None:
-        terminal_config = {}
     if not isinstance(terminal_config, Mapping):
-        raise TypeError("terminal config must be a mapping")
+        terminal_config = {}
 
     backends = terminal_config.get("backends", {})
-    if backends is None:
-        backends = {}
     if not isinstance(backends, Mapping):
-        raise TypeError("terminal.backends config must be a mapping")
+        backends = {}
 
     provider_name = provider.name.strip().lower()
     configured = backends.get(provider_name, {})
-    if configured is None:
-        configured = {}
     if not isinstance(configured, Mapping):
-        raise TypeError(f"terminal.backends.{provider_name} config must be a mapping")
+        configured = {}
     raw_backend_config = deepcopy(dict(configured))
 
     return provider.validated_config(raw_backend_config)

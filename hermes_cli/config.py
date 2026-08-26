@@ -3276,9 +3276,7 @@ def read_raw_config() -> Dict[str, Any]:
         return data
 
 
-def read_user_config_raw(
-    config_path: Optional[Path] = None, *, require_mapping: bool = False
-) -> Dict[str, Any]:
+def read_user_config_raw(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """Read a user ``config.yaml`` EXACTLY as written on disk.
 
     No DEFAULT_CONFIG merge, no managed-scope overlay, no ``${ENV_VAR}``
@@ -3296,10 +3294,6 @@ def read_user_config_raw(
       * RAW-FILE DIAGNOSTICS (doctor, deprecation sweeps): these inspect
         what the user actually wrote — stale root keys, drift against .env —
         and merged defaults would produce false positives.
-      * FAIL-CLOSED PLUGIN RUNTIME HANDOFFS: provider-owned configuration must
-        distinguish a missing file (no provider config) from unreadable or
-        malformed YAML. Silently substituting defaults could execute against
-        the wrong remote workspace or account.
       * PRESENCE-SENSITIVE ENV BRIDGES (gateway/send bridges that only
         export a key when the user explicitly set it): a defaults merge
         would make every key "present" and bridge the entire DEFAULT_CONFIG
@@ -3315,7 +3309,7 @@ def read_user_config_raw(
       * unparseable YAML / other I/O errors → raises (callers that want
         fail-open already wrap in try/except; callers with last-known-good
         or warn semantics rely on the exception)
-      * non-dict YAML root → ``{}``, or raises when ``require_mapping=True``
+      * non-dict YAML root → ``{}``
 
     ``config_path`` defaults to :func:`get_config_path` (profile-aware).
     Pass an explicit path when the caller resolves its own home (gateway
@@ -3325,21 +3319,10 @@ def read_user_config_raw(
         config_path = get_config_path()
     try:
         with open(config_path, encoding="utf-8") as f:
-            raw_text = f.read()
-            data = fast_safe_load(raw_text)
+            data = fast_safe_load(f) or {}
     except FileNotFoundError:
         return {}
-    if data is None:
-        content_lines = (
-            line for line in raw_text.splitlines() if not line.lstrip().startswith("#")
-        )
-        if not "\n".join(content_lines).strip():
-            data = {}
-    if isinstance(data, dict):
-        return data
-    if require_mapping:
-        raise TypeError("config YAML root must be a mapping")
-    return {}
+    return data if isinstance(data, dict) else {}
 
 
 def read_raw_config_readonly() -> Dict[str, Any]:

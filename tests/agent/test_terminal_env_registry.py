@@ -74,14 +74,17 @@ def test_rejects_empty_name():
         reg.register_provider(Bad())
 
 
-@pytest.mark.parametrize("name", ["BadName", "bad-name", "bad.name", "1bad", "__proto__"])
-def test_rejects_invalid_names(name):
-    class Bad(_Provider):
+def test_registration_normalizes_provider_name():
+    class MixedCase(_Provider):
         pass
 
-    Bad.name = name
-    with pytest.raises(ValueError, match="lowercase"):
-        reg.register_provider(Bad())
+    MixedCase.name = "  Mixed_Name  "
+    provider = MixedCase()
+
+    reg.register_provider(provider)
+
+    assert reg.get_provider("mixed_name") is provider
+    assert reg.plugin_backend_names() == ["mixed_name"]
 
 
 @pytest.mark.parametrize("reserved", sorted(reg.BUILTIN_BACKEND_NAMES))
