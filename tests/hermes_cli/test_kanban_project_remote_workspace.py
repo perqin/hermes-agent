@@ -111,7 +111,7 @@ def test_controller_completion_does_not_cleanup_backend_worktree_on_host(home, m
 
 
 @pytest.mark.parametrize("project_id", [None, "p_remote"])
-def test_cleanup_metadata_failure_preserves_project_worktree(monkeypatch, project_id):
+def test_legacy_cleanup_classification_never_reads_mutable_board_metadata(monkeypatch, project_id):
     task = SimpleNamespace(project_id=project_id)
     monkeypatch.setattr(kb, "get_task", lambda _conn, _task_id: task)
     monkeypatch.setattr(
@@ -120,12 +120,17 @@ def test_cleanup_metadata_failure_preserves_project_worktree(monkeypatch, projec
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("metadata unavailable")),
     )
 
-    bound_task, meta = kbw._backend_worktree_binding(
+    binding = kbw._backend_worktree_binding(
         object(), "t_remote", "/srv/shared/repo/.worktrees/t_remote",
     )
 
-    assert bound_task is task
-    assert meta == {}
+    if project_id is None:
+        assert binding is None
+    else:
+        bound_task, meta = binding
+        assert bound_task is task
+        assert meta["default_workdir"] == "/srv/shared/repo"
+        assert meta["filesystem_local"] is None
 
 
 @pytest.mark.parametrize("source_filesystem_local", [False, True])
@@ -440,7 +445,7 @@ def test_nonproject_remote_explicit_worktree_never_reaches_controller_git(home, 
         )
 
     assert [row[0] for row in result.spawned] == [task_id]
-    assert spawned == ["/other/backend/worktree"]
+    assert spawned == [f"/other/backend/worktree/.worktrees/{task_id}"]
 
 
 def _task(task_id="t_remote"):
@@ -559,7 +564,9 @@ def test_worker_cleans_safe_remote_worktree_in_assignee_environment():
     assert "status_output=$(git -C" in command
     assert "status --porcelain --untracked-files=normal) || exit 43" in command
     assert "remote_refs=$(git -C" in command
-    assert "branch -r --contains HEAD) || exit 43" in command
+    assert 'actual_branch=$(git -C "$actual_target" branch --show-current)' in command
+    assert 'branch_tip=$(git -C "$actual_root" rev-parse --verify "refs/heads/$branch")' in command
+    assert 'branch -r --contains "$branch_tip") || exit 43' in command
     assert "worktree remove" in command
     assert calls[0][1]["rewrite_compound_background"] is False
 
@@ -581,7 +588,10 @@ def test_worker_validates_remote_directory_without_git():
             calls.append((command, kwargs))
             return {
                 "returncode": 0,
-                "output": f"{worker_ws._ROOT_MARKER}/srv/shared/output\n",
+                "output": (
+                    f"{worker_ws._ROOT_MARKER}/srv/shared/output\n"
+                    f"{worker_ws._WORKSPACE_MARKER}/srv/shared/output\n"
+                ),
             }
 
     workspace, branch = worker_ws.materialize_project_workspace(
@@ -598,6 +608,63 @@ def test_worker_validates_remote_directory_without_git():
     assert workspace == "/srv/shared/output"
     assert branch == ""
     assert "git" not in calls[0][0]
+
+
+def test_worker_rejects_project_dir_when_provenance_root_resolves_elsewhere():
+    from hermes_cli import kanban_worker_workspace as worker_ws
+
+    task = _task("t_project_dir")
+    task.workspace_kind = "dir"
+    task.workspace_path = "/srv/shared/project/subdir"
+    task.branch_name = None
+
+    class WrongRootEnvironment:
+        is_local = False
+
+        def execute(self, _command, **_kwargs):
+            return {
+                "returncode": 0,
+                "output": (
+                    f"{worker_ws._ROOT_MARKER}/other/project\n"
+                    f"{worker_ws._WORKSPACE_MARKER}/srv/shared/project/subdir\n"
+                ),
+            }
+
+    with pytest.raises(ValueError, match="cannot use"):
+        worker_ws.materialize_project_workspace(
+            task,
+            {"default_workdir": "/srv/shared/project"},
+            WrongRootEnvironment(),
+            profile="worker-b",
+        )
+
+
+def test_worker_accepts_project_subdirectory_only_after_root_and_target_match():
+    from hermes_cli import kanban_worker_workspace as worker_ws
+
+    task = _task("t_project_subdir")
+    task.workspace_kind = "dir"
+    task.workspace_path = "/srv/shared/project/subdir"
+    task.branch_name = None
+
+    class MatchingEnvironment:
+        is_local = False
+
+        def execute(self, _command, **_kwargs):
+            return {
+                "returncode": 0,
+                "output": (
+                    f"{worker_ws._ROOT_MARKER}/srv/shared/project\n"
+                    f"{worker_ws._WORKSPACE_MARKER}/srv/shared/project/subdir\n"
+                ),
+            }
+
+    assert worker_ws.materialize_project_workspace(
+        task,
+        {"default_workdir": "/srv/shared/project"},
+        MatchingEnvironment(),
+        profile="worker-b",
+    ) == ("/srv/shared/project/subdir", "")
 
 
 def test_worker_blocks_when_assignee_resolves_different_root():
@@ -721,3 +788,316 @@ def test_failed_worker_preflight_blocks_task_with_profile_and_path(home, monkeyp
         blocked = [event for event in kb.list_events(conn, task_id) if event.kind == "blocked"][-1]
         assert "worker-b" in str(blocked.payload)
         assert "/srv/shared/remote-app" in str(blocked.payload)
+
+
+def test_worker_preflight_makes_workspace_authoritative_for_first_file_operation_without_shared_env_leak(
+    home, monkeypatch,
+):
+    from hermes_cli import kanban_worker_workspace as worker_ws
+    import tools.file_tools as file_tools
+    import tools.terminal_tool as terminal_tool
+
+    _remote_board()
+    with kbc.connect(board="shared") as conn:
+        task_id = kb.create_task(
+            conn, title="write first file", assignee="worker-b", board="shared",
+        )
+        task = kb.get_task(conn, task_id)
+        assert kb.claim_task(conn, task_id) is not None
+
+    calls = []
+
+    class SharedEnvironment:
+        is_local = False
+        cwd = "/profile-default"
+
+        def execute(self, command, **kwargs):
+            calls.append((command, kwargs))
+            if worker_ws._WORKSPACE_MARKER in command:
+                return {
+                    "returncode": 0,
+                    "output": (
+                        f"{worker_ws._ROOT_MARKER}/srv/shared/remote-app\n"
+                        f"{worker_ws._WORKSPACE_MARKER}{task.workspace_path}\n"
+                        f"{worker_ws._BRANCH_MARKER}{task.branch_name}\n"
+                    ),
+                }
+            return {"returncode": 0, "output": ""}
+
+    shared = SharedEnvironment()
+    monkeypatch.setattr(terminal_tool, "acquire_terminal_environment", lambda **_kwargs: shared)
+    monkeypatch.setattr(terminal_tool, "_active_environments", {"default": shared})
+    monkeypatch.setattr(file_tools, "_file_ops_cache", {})
+    monkeypatch.setenv("HERMES_PROFILE", "worker-b")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "shared")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kb.kanban_db_path(board="shared")))
+    monkeypatch.setenv("HERMES_KANBAN_BACKEND_ROOT", "/srv/shared/remote-app")
+
+    assert worker_ws.prepare_project_workspace_from_env() == task.workspace_path
+    assert shared.cwd == "/profile-default"
+
+    task_ops = file_tools._get_file_ops(task_id)
+    task_ops._exec(":")
+    assert calls[-1][1]["cwd"] == task.workspace_path
+
+    other_ops = file_tools._get_file_ops("t_other")
+    other_ops._exec(":")
+    assert calls[-1][1]["cwd"] == "/profile-default"
+    assert other_ops is not task_ops
+
+
+def test_project_dir_task_persists_immutable_workspace_provenance(home):
+    _remote_board()
+    with kbc.connect(board="shared") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="use project directory",
+            assignee="worker-b",
+            board="shared",
+            workspace_kind="dir",
+            workspace_path="/srv/shared/remote-app/subdir",
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert task.workspace_root == "/srv/shared/remote-app"
+    assert task.workspace_requires_preflight is True
+    assert task.workspace_filesystem_local is False
+    assert task.workspace_source_profile == "owner"
+    assert task.workspace_project_slug == "remote-app"
+
+
+def test_direct_remote_worktree_override_is_repo_root_and_persists_provenance(home):
+    kb.create_board(
+        "remote-git-override",
+        default_workdir="/srv/shared/repo",
+        default_workspace_kind="worktree",
+        filesystem_local=False,
+        source_profile="dashboard-owner",
+    )
+    with kbc.connect(board="remote-git-override") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="other remote repo",
+            assignee="worker-b",
+            board="remote-git-override",
+            workspace_kind="worktree",
+            workspace_path="/other/repo",
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert task.workspace_path == f"/other/repo/.worktrees/{task_id}"
+    assert task.workspace_root == "/other/repo"
+    assert task.workspace_requires_preflight is True
+    assert task.workspace_filesystem_local is False
+    assert task.workspace_source_profile == "dashboard-owner"
+
+
+def test_dispatch_and_cleanup_use_task_provenance_after_current_board_changes(
+    home, monkeypatch,
+):
+    from agent import delegation_context
+    from hermes_cli import kanban_worker_workspace as worker_ws
+    import tools.terminal_tool as terminal_tool
+
+    _remote_board()
+    kb.create_board(
+        "other",
+        default_workdir="/host/local/other",
+        default_workspace_kind="worktree",
+        filesystem_local=True,
+    )
+    with kbc.connect(board="shared") as conn:
+        task_id = kb.create_task(
+            conn, title="immutable provenance", assignee="worker-b", board="shared",
+        )
+        original = kb.get_task(conn, task_id)
+        assert kb.claim_task(conn, task_id) is not None
+        kb.write_board_metadata("shared", clear_project_binding=True)
+        kb.set_current_board("other")
+
+        monkeypatch.setattr(
+            kb,
+            "read_board_metadata",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Board metadata consulted")),
+        )
+        monkeypatch.setattr(
+            kb,
+            "get_current_board",
+            lambda: (_ for _ in ()).throw(AssertionError("current Board consulted")),
+        )
+        binding = kbd._backend_owned_project_binding(kb.get_task(conn, task_id), "shared")
+        assert binding["default_workdir"] == "/srv/shared/remote-app"
+
+        monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+        monkeypatch.setattr(delegation_context, "is_dispatcher_owned_worker_context", lambda: True)
+        remote_env = SimpleNamespace(is_local=False)
+        monkeypatch.setattr(terminal_tool, "acquire_terminal_environment", lambda **_k: remote_env)
+        cleaned = []
+        monkeypatch.setattr(
+            worker_ws,
+            "cleanup_project_worktree",
+            lambda task, meta, env, **_k: cleaned.append((task.id, meta["default_workdir"], env)) or True,
+        )
+        monkeypatch.setattr(
+            kbw,
+            "_cleanup_worktree_workspace",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("host cleanup ran")),
+        )
+
+        kbw._cleanup_workspace(conn, task_id)
+    assert cleaned == [(task_id, "/srv/shared/remote-app", remote_env)]
+
+
+def test_workspace_provenance_columns_are_added_to_legacy_database(tmp_path, monkeypatch):
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE tasks ("
+        "id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, assignee TEXT, "
+        "status TEXT NOT NULL, priority INTEGER DEFAULT 0, created_by TEXT, "
+        "created_at INTEGER NOT NULL, started_at INTEGER, completed_at INTEGER, "
+        "workspace_kind TEXT NOT NULL DEFAULT 'scratch', workspace_path TEXT, "
+        "claim_lock TEXT, claim_expires INTEGER)"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db))
+
+    with kbc.connect() as migrated:
+        columns = {row["name"] for row in migrated.execute("PRAGMA table_info(tasks)")}
+
+    assert {
+        "workspace_root",
+        "workspace_requires_preflight",
+        "workspace_filesystem_local",
+        "workspace_source_profile",
+        "workspace_project_slug",
+    } <= columns
+
+
+def test_remote_cleanup_preserves_switched_worktree_and_unpushed_stored_branch(tmp_path):
+    from hermes_cli import kanban_worker_workspace as worker_ws
+
+    remote = tmp_path / "remote.git"
+    repo = tmp_path / "repo"
+    target = repo / ".worktrees" / "t_cleanup"
+
+    def git(*args, cwd=None):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+        )
+
+    git("init", "--bare", str(remote))
+    git("init", str(repo))
+    git("config", "user.name", "Test", cwd=repo)
+    git("config", "user.email", "test@example.com", cwd=repo)
+    (repo / "README").write_text("base\n", encoding="utf-8")
+    git("add", "README", cwd=repo)
+    git("commit", "-m", "base", cwd=repo)
+    git("branch", "-M", "main", cwd=repo)
+    git("remote", "add", "origin", str(remote), cwd=repo)
+    git("push", "-u", "origin", "main", cwd=repo)
+    git("branch", "published", cwd=repo)
+    git("push", "origin", "published", cwd=repo)
+    git("worktree", "add", "-b", "wt/t_cleanup", str(target), cwd=repo)
+    (target / "README").write_text("unpushed\n", encoding="utf-8")
+    git("add", "README", cwd=target)
+    git("commit", "-m", "unpushed", cwd=target)
+    git("switch", "published", cwd=target)
+
+    completed = subprocess.run(
+        worker_ws._remote_cleanup_command(
+            str(repo.resolve()), str(target.resolve()), "wt/t_cleanup",
+        ),
+        shell=True,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert f"{worker_ws._CLEANUP_MARKER}preserved" in completed.stdout
+    assert target.is_dir()
+    assert git("show-ref", "--verify", "refs/heads/wt/t_cleanup", cwd=repo).returncode == 0
+
+
+def test_remote_materialization_rejects_unrelated_repo_at_expected_worktree_path(tmp_path):
+    from hermes_cli import kanban_worker_workspace as worker_ws
+
+    root = tmp_path / "root"
+    target = root / ".worktrees" / "t_collision"
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    target.mkdir(parents=True)
+    subprocess.run(["git", "init", str(target)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(target), "checkout", "-b", "wt/t_collision"],
+        check=True,
+        capture_output=True,
+    )
+
+    task = _task("t_collision")
+    task.project_id = None
+    task.workspace_path = str(target.resolve())
+    task.branch_name = "wt/t_collision"
+    task.workspace_root = str(root.resolve())
+    task.workspace_requires_preflight = True
+
+    class ShellEnvironment:
+        is_local = False
+
+        def execute(self, command, **_kwargs):
+            completed = subprocess.run(
+                command, shell=True, capture_output=True, text=True, check=False,
+            )
+            return {
+                "returncode": completed.returncode,
+                "output": completed.stdout + completed.stderr,
+            }
+
+    with pytest.raises(ValueError, match="cannot use"):
+        worker_ws.materialize_project_workspace(
+            task,
+            {"default_workdir": str(root.resolve())},
+            ShellEnvironment(),
+            profile="worker-b",
+        )
+
+    assert target.is_dir()
+
+
+def test_legacy_project_dir_task_falls_back_to_its_immutable_path_without_board_lookup(monkeypatch):
+    task = SimpleNamespace(
+        id="t_legacy_dir",
+        project_id="p_legacy",
+        workspace_kind="dir",
+        workspace_path="/backend/project/subdir",
+        workspace_root=None,
+        workspace_requires_preflight=False,
+        workspace_filesystem_local=None,
+        workspace_source_profile=None,
+        workspace_project_slug=None,
+    )
+    monkeypatch.setattr(
+        kb,
+        "read_board_metadata",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Board metadata consulted")),
+    )
+    monkeypatch.setattr(
+        kb,
+        "get_current_board",
+        lambda: (_ for _ in ()).throw(AssertionError("current Board consulted")),
+    )
+
+    provenance = kbd._backend_owned_project_binding(task, "rebound")
+
+    assert provenance == {
+        "project_id": "p_legacy",
+        "project_slug": None,
+        "default_workdir": "/backend/project/subdir",
+        "default_workspace_kind": "dir",
+        "filesystem_local": None,
+    }

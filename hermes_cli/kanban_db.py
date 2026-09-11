@@ -716,6 +716,14 @@ class Task:
     tenant: Optional[str]
     branch_name: Optional[str] = None
     project_id: Optional[str] = None
+    # Immutable execution snapshot captured at task creation.  Board metadata
+    # may later be rebound or cleared; dispatch/preflight/cleanup use only this
+    # task provenance for backend-owned paths.
+    workspace_root: Optional[str] = None
+    workspace_requires_preflight: bool = False
+    workspace_filesystem_local: Optional[bool] = None
+    workspace_source_profile: Optional[str] = None
+    workspace_project_slug: Optional[str] = None
     result: Optional[str] = None
     idempotency_key: Optional[str] = None
     # Column semantics: see SCHEMA_SQL.
@@ -759,6 +767,11 @@ class Task:
             skills=skills_value,
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
+            workspace_requires_preflight=bool(g("workspace_requires_preflight")),
+            workspace_filesystem_local=(
+                None if g("workspace_filesystem_local") is None
+                else bool(g("workspace_filesystem_local"))
+            ),
         )
 
 
@@ -772,6 +785,7 @@ _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
     "current_step_key", "max_retries", "session_id", "completion_contract",
+    "workspace_root", "workspace_source_profile", "workspace_project_slug",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -894,6 +908,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the task's worktree is anchored under the project's primary repo with a
     -- deterministic branch name instead of a random wt/<task-id> fallback.
     project_id           TEXT,
+    workspace_root       TEXT,
+    workspace_requires_preflight INTEGER NOT NULL DEFAULT 0,
+    workspace_filesystem_local INTEGER,
+    workspace_source_profile TEXT,
+    workspace_project_slug TEXT,
     claim_lock           TEXT,
     claim_expires        INTEGER,
     tenant               TEXT,
@@ -1377,8 +1396,27 @@ def create_task(
         project_obj is None
         and workspace_kind == "worktree"
         and board_meta.get("filesystem_local") is False
-        and workspace_path == str(board_meta.get("default_workdir") or "")
+        and bool(workspace_path)
     )
+
+    workspace_root: Optional[str] = None
+    workspace_requires_preflight = False
+    workspace_filesystem_local = None
+    workspace_source_profile = None
+    workspace_project_slug = None
+    if project_obj is not None:
+        workspace_root = str(project_obj.primary_path or project_repo or "").strip() or None
+        workspace_requires_preflight = bool(workspace_root)
+        workspace_filesystem_local = board_meta.get("filesystem_local")
+        workspace_source_profile = str(board_meta.get("source_profile") or "").strip() or None
+        workspace_project_slug = str(
+            board_meta.get("project_slug") or getattr(project_obj, "slug", "") or ""
+        ).strip() or None
+    elif board_meta.get("filesystem_local") is False and workspace_kind in {"dir", "worktree"}:
+        workspace_root = str(workspace_path or board_meta.get("default_workdir") or "").strip() or None
+        workspace_requires_preflight = bool(workspace_root)
+        workspace_filesystem_local = False
+        workspace_source_profile = str(board_meta.get("source_profile") or "").strip() or None
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -1397,7 +1435,7 @@ def create_task(
                     if not branch_name:
                         branch_name = _project_branch_name(project_obj, task_id, title)
                 elif backend_board_worktree:
-                    root = str(board_meta["default_workdir"])
+                    root = str(workspace_root)
                     separator = "\\" if "\\" in root and "/" not in root else "/"
                     workspace_path = root.rstrip("/\\") + separator + separator.join((".worktrees", task_id))
                     if not branch_name:
@@ -1409,16 +1447,22 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
+                        workspace_root, workspace_requires_preflight,
+                        workspace_filesystem_local, workspace_source_profile,
+                        workspace_project_slug,
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
                         goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
                         created_by, now, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
+                        workspace_root, 1 if workspace_requires_preflight else 0,
+                        (None if workspace_filesystem_local is None else int(bool(workspace_filesystem_local))),
+                        workspace_source_profile, workspace_project_slug,
                         _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,

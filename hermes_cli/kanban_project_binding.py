@@ -79,3 +79,26 @@ def clear_owned_project_binding(project_conn, project: Any, board: str) -> None:
         if isinstance(exc, ValueError):
             raise
         raise ValueError("board unbind failed before reciprocal metadata was committed") from None
+
+
+@contextmanager
+def reciprocal_project_unbind(
+    project_conn,
+    project: Any,
+    board: str,
+) -> Iterator[None]:
+    """Compensate Board metadata when its reciprocal Project unbind fails."""
+    path = kb.board_metadata_path(board)
+    before = path.read_bytes() if path.exists() else None
+    try:
+        yield
+        if not pdb.update_project(project_conn, project.id, board_slug=""):
+            raise ValueError(f"project {project.slug!r} disappeared during unbind")
+    except Exception as exc:
+        try:
+            _restore_metadata(path, before)
+        except OSError:
+            raise ValueError("board unbind failed and metadata rollback failed") from None
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError("board unbind failed before reciprocal metadata was committed") from None

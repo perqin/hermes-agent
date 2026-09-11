@@ -214,7 +214,7 @@ def test_dashboard_backend_path_and_workspace_inheritance_bundle_contract():
 
     # An untouched board default is inheritance, not an explicit task override.
     assert "const [workspacePathDirty, setWorkspacePathDirty] = useState(false);" in bundle
-    assert "if (workspacePathDirty) body.workspace_path = wpTrim;" in bundle
+    assert "if (workspacePathDirty) body.workspace_path = workspacePath;" in bundle
     assert "setWorkspacePathDirty(true)" in bundle
 
     # Browser input stays textual and tells users where resolution happens.
@@ -226,6 +226,33 @@ def test_dashboard_backend_path_and_workspace_inheritance_bundle_contract():
     # Both Board dialogs retain backend errors and return focus to the path.
     assert bundle.count("setErr(parseApiErrorMessage(e))") >= 2
     assert bundle.count("projectDirectoryRef.current.focus()") >= 2
+
+    # trim() decides only blank/clear UX; backend path parsers receive raw text.
+    assert "default_workdir: projectDirectory.trim() ? projectDirectory : undefined" in bundle
+    assert "default_workdir: projectDirectory.trim() ? projectDirectory : \"\"" in bundle
+    assert "if (workspacePathDirty) body.workspace_path = workspacePath;" in bundle
+    assert "body.workspace_path = wpTrim" not in bundle
+
+    # Omission means inherit Board/Project defaults. Explicit scratch is a real
+    # override and therefore must be sent rather than omitted.
+    assert 'if (workspaceKind === "scratch") body.workspace_kind = "scratch";' in bundle
+
+
+def test_project_directory_helper_pending_and_validation_copy_exist_in_every_web_locale():
+    locale_dir = Path(__file__).resolve().parents[2] / "web" / "src" / "i18n"
+    locale_files = [
+        "en.ts", "af.ts", "ar.ts", "de.ts", "es.ts", "fr.ts", "ga.ts",
+        "hu.ts", "it.ts", "ja.ts", "ko.ts", "pt.ts", "ru.ts", "tr.ts",
+        "uk.ts", "zh.ts", "zh-hant.ts",
+    ]
+    for filename in locale_files:
+        text = (locale_dir / filename).read_text(encoding="utf-8")
+        for key in (
+            "projectDirectoryExplanation",
+            "projectDirectoryPending",
+            "projectDirectoryValidationError",
+        ):
+            assert f"{key}:" in text, f"{filename} is missing {key}"
 
 
 # ---------------------------------------------------------------------------

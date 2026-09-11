@@ -781,6 +781,10 @@ export const ga: Translations = {
     workspacePathDir: "conair workspace (riachtanach, m.sh. ~/projects/my-app)",
     workspacePathOptional:
       "conair workspace (roghnach, díorthaithe ón sannaí má tá sé folamh)",
+    projectDirectoryExplanation:
+      "Réitítear an chonair absalóideach i dtimpeallacht teirminéil phróifíl na hiarrata seo agus í á sábháil.",
+    projectDirectoryPending: "Comhadlann an tionscadail á bailíochtú sa timpeallacht teirminéil…",
+    projectDirectoryValidationError: "Theip ar bhailíochtú chomhadlann an tionscadail: {error}",
     logTruncated: "(taispeántar an 100 KB deireanach — loga iomlán ag ",
     logAt: ")",
   },

@@ -773,6 +773,10 @@ export const ru: Translations = {
     workspacePathDir: "путь к рабочей области (обязательно, например ~/projects/my-app)",
     workspacePathOptional:
       "путь к рабочей области (необязательно, выводится из исполнителя, если не указан)",
+    projectDirectoryExplanation:
+      "При сохранении абсолютный путь разрешается в терминальном окружении профиля этого запроса.",
+    projectDirectoryPending: "Проверка каталога проекта в терминальном окружении…",
+    projectDirectoryValidationError: "Не удалось проверить каталог проекта: {error}",
     logTruncated: "(показаны последние 100 KB — полный журнал в ",
     logAt: ")",
   },

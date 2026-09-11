@@ -772,6 +772,10 @@ export const ja: Translations = {
     workspacePathDir: "ワークスペースのパス（必須、例: ~/projects/my-app）",
     workspacePathOptional:
       "ワークスペースのパス（任意、空の場合は担当者から導出）",
+    projectDirectoryExplanation:
+      "保存時に、このリクエストプロファイルのターミナル環境で絶対パスが解決されます。",
+    projectDirectoryPending: "ターミナル環境でプロジェクトディレクトリを検証しています…",
+    projectDirectoryValidationError: "プロジェクトディレクトリの検証に失敗しました: {error}",
     logTruncated: "（最後の 100 KB を表示中 — 完全なログは ",
     logAt: "）",
   },

@@ -291,3 +291,114 @@ def test_patch_restores_board_if_project_link_fails(client, project, monkeypatch
 
     assert response.status_code == 400
     assert kb.board_metadata_path("patch-rollback").read_bytes() == before
+
+
+def test_patch_bound_board_rejects_divergent_default_workdir_without_unbind(
+    client, project, tmp_path,
+):
+    created = client.post(
+        "/api/plugins/kanban/boards",
+        json={"slug": "bound-path", "project_id": project["id"]},
+    )
+    assert created.status_code == 200, created.text
+    before = kb.board_metadata_path("bound-path").read_bytes()
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+
+    response = client.patch(
+        "/api/plugins/kanban/boards/bound-path",
+        json={"default_workdir": str(unrelated)},
+    )
+
+    assert response.status_code == 400
+    assert "unbind" in response.json()["detail"].lower()
+    assert kb.board_metadata_path("bound-path").read_bytes() == before
+
+
+def test_dashboard_unbind_rejects_cross_profile_project_mutation(
+    client, project, monkeypatch,
+):
+    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "owner-a")
+    assert client.post(
+        "/api/plugins/kanban/boards",
+        json={"slug": "profile-owned", "project_id": project["id"]},
+    ).status_code == 200
+    before = kb.board_metadata_path("profile-owned").read_bytes()
+    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "owner-b")
+
+    response = client.patch(
+        "/api/plugins/kanban/boards/profile-owned",
+        json={"project_id": ""},
+    )
+
+    assert response.status_code == 400
+    assert "owner-a" in response.json()["detail"]
+    assert kb.board_metadata_path("profile-owned").read_bytes() == before
+    with pdb.connect_closing() as conn:
+        assert pdb.get_project(conn, project["id"]).board_slug == "profile-owned"
+
+
+def test_dashboard_unbind_db_open_failure_leaves_board_unchanged(
+    client, project, monkeypatch,
+):
+    assert client.post(
+        "/api/plugins/kanban/boards",
+        json={"slug": "open-failure", "project_id": project["id"]},
+    ).status_code == 200
+    before = kb.board_metadata_path("open-failure").read_bytes()
+    monkeypatch.setattr(
+        pdb,
+        "connect_closing",
+        lambda: (_ for _ in ()).throw(OSError("database unavailable")),
+    )
+
+    response = client.patch(
+        "/api/plugins/kanban/boards/open-failure",
+        json={"name": "must rollback", "project_id": ""},
+    )
+
+    assert response.status_code == 400
+    assert kb.board_metadata_path("open-failure").read_bytes() == before
+
+
+def test_dashboard_unbind_project_update_failure_compensates_all_board_changes(
+    client, project, monkeypatch,
+):
+    assert client.post(
+        "/api/plugins/kanban/boards",
+        json={"slug": "update-failure", "project_id": project["id"]},
+    ).status_code == 200
+    before = kb.board_metadata_path("update-failure").read_bytes()
+    monkeypatch.setattr(pdb, "update_project", lambda *_a, **_k: False)
+
+    response = client.patch(
+        "/api/plugins/kanban/boards/update-failure",
+        json={"name": "must rollback", "project_id": ""},
+    )
+
+    assert response.status_code == 400
+    assert kb.board_metadata_path("update-failure").read_bytes() == before
+
+
+def test_patch_submits_nonblank_workdir_to_backend_without_trimming(
+    client, monkeypatch,
+):
+    kb.create_board("raw-path")
+    seen = []
+    monkeypatch.setattr(
+        kanban_project_paths,
+        "resolve_project_directory",
+        lambda raw, **_kwargs: seen.append(raw) or {
+            "default_workdir": "/srv/canonical/repo",
+            "default_workspace_kind": "worktree",
+            "filesystem_local": False,
+        },
+    )
+
+    response = client.patch(
+        "/api/plugins/kanban/boards/raw-path",
+        json={"default_workdir": "  /srv/repo with spaces  "},
+    )
+
+    assert response.status_code == 200, response.text
+    assert seen == ["  /srv/repo with spaces  "]

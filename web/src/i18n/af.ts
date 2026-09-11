@@ -773,6 +773,10 @@ export const af: Translations = {
     workspacePathDir: "werkruimtepad (verpligtend, bv. ~/projects/my-app)",
     workspacePathOptional:
       "werkruimtepad (opsioneel, afgelei van toegewysde indien leeg)",
+    projectDirectoryExplanation:
+      "Die absolute pad word tydens stoor in hierdie versoekprofiel se terminaalomgewing opgelos.",
+    projectDirectoryPending: "Die projekgids word in die terminaalomgewing bekragtig…",
+    projectDirectoryValidationError: "Bekragtiging van die projekgids het misluk: {error}",
     logTruncated: "(toon laaste 100 KB — volledige log by ",
     logAt: ")",
   },

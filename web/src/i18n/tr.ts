@@ -773,6 +773,10 @@ export const tr: Translations = {
     workspacePathDir: "workspace yolu (zorunlu, ör. ~/projects/my-app)",
     workspacePathOptional:
       "workspace yolu (isteğe bağlı, boşsa atanan kişiden türetilir)",
+    projectDirectoryExplanation:
+      "Mutlak yol kaydedilirken bu istek profilinin terminal ortamında çözümlenir.",
+    projectDirectoryPending: "Proje dizini terminal ortamında doğrulanıyor…",
+    projectDirectoryValidationError: "Proje dizini doğrulanamadı: {error}",
     logTruncated: "(son 100 KB gösteriliyor — tam günlük şurada: ",
     logAt: ")",
   },

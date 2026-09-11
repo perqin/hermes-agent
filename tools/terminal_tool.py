@@ -291,10 +291,16 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         # or the collapsed container id (isolation-keyed rollouts); try both so
         # a CWD-only override (which collapses to "default") still finds it.
         container_id = _resolve_container_task_id(task_id)
-        with _env_lock:
-            env = _active_environments.get(task_id) or _active_environments.get(container_id)
-        if env is not None and getattr(env, "cwd", None) is not None:
-            env.cwd = new_cwd
+        # A collapsed environment (for example persistent Docker or CLI
+        # ``default``) is shared by several task/session ids.  Mutating its
+        # compatibility ``cwd`` attribute would leak this task's workspace into
+        # the next task.  Raw-keyed environments are private and retain the
+        # historical immediate update behaviour.
+        if container_id == task_id:
+            with _env_lock:
+                env = _active_environments.get(task_id)
+            if env is not None and getattr(env, "cwd", None) is not None:
+                env.cwd = new_cwd
 
 
 def clear_task_env_overrides(task_id: str):

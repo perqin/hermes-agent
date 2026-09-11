@@ -772,6 +772,10 @@ export const ko: Translations = {
     workspacePathDir: "작업 공간 경로 (필수, 예: ~/projects/my-app)",
     workspacePathOptional:
       "작업 공간 경로 (선택, 비어 있으면 담당자에서 파생됨)",
+    projectDirectoryExplanation:
+      "저장할 때 이 요청 프로필의 터미널 환경에서 절대 경로를 확인합니다.",
+    projectDirectoryPending: "터미널 환경에서 프로젝트 디렉터리를 확인하는 중…",
+    projectDirectoryValidationError: "프로젝트 디렉터리 확인 실패: {error}",
     logTruncated: "(마지막 100 KB 표시 중 — 전체 로그 위치: ",
     logAt: ")",
   },

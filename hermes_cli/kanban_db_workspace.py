@@ -111,30 +111,23 @@ def _is_managed_scratch_path(p: Path) -> bool:
 
 
 def _backend_worktree_binding(conn: sqlite3.Connection, task_id: str, path: str):
-    """Return ``(task, metadata)`` when *path* may belong to a backend Board."""
+    """Return ``(task, provenance)`` for a backend-owned worktree."""
     try:
         task = _kb.get_task(conn, task_id)
     except Exception:
         return None
     if task is None:
         return None
-    try:
-        meta = _kb.read_board_metadata(_kb.get_current_board())
-    except Exception:
-        return task, {}
-
-    root = str(meta.get("default_workdir") or "")
-    project_binding = (
-        bool(getattr(task, "project_id", None))
-        and meta.get("project_id") == task.project_id
-    )
-    direct_backend_path = (
-        meta.get("filesystem_local") is False
-        and root
-        and bool(path)
-    )
-    if project_binding or direct_backend_path:
-        return task, meta
+    root = str(getattr(task, "workspace_root", None) or "").strip()
+    if getattr(task, "workspace_requires_preflight", False) and root:
+        return task, {
+            "project_id": getattr(task, "project_id", None),
+            "project_slug": getattr(task, "workspace_project_slug", None),
+            "source_profile": getattr(task, "workspace_source_profile", None),
+            "default_workdir": root,
+            "default_workspace_kind": getattr(task, "workspace_kind", None),
+            "filesystem_local": getattr(task, "workspace_filesystem_local", None),
+        }
     if getattr(task, "project_id", None):
         from hermes_cli.kanban_project_paths import worktree_root_for_task
 

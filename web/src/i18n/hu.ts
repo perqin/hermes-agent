@@ -773,6 +773,10 @@ export const hu: Translations = {
     workspacePathDir: "munkaterület útvonala (kötelező, pl. ~/projects/my-app)",
     workspacePathOptional:
       "munkaterület útvonala (opcionális, üresen a felelősből származtatva)",
+    projectDirectoryExplanation:
+      "Mentéskor az abszolút elérési utat a kérési profil terminálkörnyezetében oldjuk fel.",
+    projectDirectoryPending: "A projektkönyvtár ellenőrzése a terminálkörnyezetben…",
+    projectDirectoryValidationError: "A projektkönyvtár ellenőrzése sikertelen: {error}",
     logTruncated: "(az utolsó 100 KB látható — teljes napló: ",
     logAt: ")",
   },

@@ -707,6 +707,10 @@ export const ar = defineLocale({
     workspacePathDir: "مسار مساحة العمل (مطلوب، مثال ~/projects/my-app)",
     workspacePathOptional:
       "مسار مساحة العمل (اختياري، مستنتج من المكلَّف إذا كان فارغًا)",
+    projectDirectoryExplanation:
+      "يُحلّ المسار المطلق في بيئة الطرفية لملف تعريف الطلب هذا عند الحفظ.",
+    projectDirectoryPending: "جارٍ التحقق من دليل المشروع في بيئة الطرفية…",
+    projectDirectoryValidationError: "فشل التحقق من دليل المشروع: {error}",
     logTruncated: "(عرض آخر 100 كيلوبايت — السجل الكامل في ",
     logAt: ")",
   },

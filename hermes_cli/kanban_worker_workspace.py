@@ -56,6 +56,12 @@ git -C "$actual_root" rev-parse --is-inside-work-tree >/dev/null
 if [ -e "$target" ]; then
   actual_target=$(cd -- "$target" && pwd -P)
   [ "$actual_target" = "$target" ] || exit 42
+  root_common=$(git -C "$actual_root" rev-parse --path-format=absolute --git-common-dir)
+  target_common=$(git -C "$actual_target" rev-parse --path-format=absolute --git-common-dir)
+  target_git_dir=$(git -C "$actual_target" rev-parse --path-format=absolute --git-dir)
+  [ "$target_common" = "$root_common" ] || exit 42
+  [ "$target_git_dir" != "$target_common" ] || exit 42
+  git -C "$actual_root" worktree list --porcelain | grep -F -x -- "worktree $actual_target" >/dev/null
   actual_branch=$(git -C "$actual_target" branch --show-current)
   [ "$actual_branch" = "$branch" ]
 else
@@ -75,13 +81,17 @@ printf '%s%s\\n' {_BRANCH_MARKER!r} "$actual_branch"
     return f"(\n{script}\n)"
 
 
-def _remote_directory_command(path: str) -> str:
-    qpath = shlex.quote(path)
+def _remote_directory_command(root: str, path: str) -> str:
+    qroot, qpath = map(shlex.quote, (root, path))
     return f"""
 set -eu
+expected_root={qroot}
 expected={qpath}
+actual_root=$(cd -- "$expected_root" && pwd -P)
 actual=$(cd -- "$expected" && pwd -P)
-printf '%s%s\\n' {_ROOT_MARKER!r} "$actual"
+printf '%s%s\\n' {_ROOT_MARKER!r} "$actual_root"
+printf '%s%s\\n' {_WORKSPACE_MARKER!r} "$actual"
+[ "$actual_root" = "$expected_root" ] || exit 42
 [ "$actual" = "$expected" ] || exit 42
 """.strip()
 
@@ -102,7 +112,10 @@ target_parent=$(dirname -- "$actual_target")
 [ "$target_parent" = "${{actual_root%/}}/.worktrees" ] || exit 42
 status_output=$(git -C "$actual_target" status --porcelain --untracked-files=normal) || exit 43
 [ -z "$status_output" ] || {{ printf '%s%s\\n' {_CLEANUP_MARKER!r} preserved; exit 0; }}
-remote_refs=$(git -C "$actual_target" branch -r --contains HEAD) || exit 43
+actual_branch=$(git -C "$actual_target" branch --show-current) || exit 43
+[ "$actual_branch" = "$branch" ] || {{ printf '%s%s\\n' {_CLEANUP_MARKER!r} preserved; exit 0; }}
+branch_tip=$(git -C "$actual_root" rev-parse --verify "refs/heads/$branch") || exit 43
+remote_refs=$(git -C "$actual_root" branch -r --contains "$branch_tip") || exit 43
 [ -n "$remote_refs" ] || {{ printf '%s%s\\n' {_CLEANUP_MARKER!r} preserved; exit 0; }}
 git -C "$actual_root" worktree remove -- "$actual_target"
 case "$branch" in wt/*) git -C "$actual_root" branch -D -- "$branch" >/dev/null 2>&1 || true ;; esac
@@ -170,12 +183,18 @@ def materialize_project_workspace(
 
     if kind == "dir":
         result = env.execute(
-            _remote_directory_command(target),
+            _remote_directory_command(root, target),
             timeout=30,
             rewrite_compound_background=False,
         )
-        actual = _single_marked(_result_field(result, "output", ""), _ROOT_MARKER)
-        if int(_result_field(result, "returncode", 1) or 0) != 0 or actual != target:
+        output = _result_field(result, "output", "")
+        actual_root = _single_marked(output, _ROOT_MARKER)
+        actual = _single_marked(output, _WORKSPACE_MARKER)
+        if (
+            int(_result_field(result, "returncode", 1) or 0) != 0
+            or actual_root != root
+            or actual != target
+        ):
             raise ValueError(
                 f"profile {profile!r} cannot use Board path {target!r}; "
                 "configure its terminal environment to access the same canonical directory"
@@ -222,7 +241,7 @@ def prepare_project_workspace_from_env() -> Optional[str]:
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_workspace as kbw
     from hermes_cli.profiles import get_active_profile_name
-    from tools.terminal_tool import acquire_terminal_environment
+    from tools.terminal_tool import acquire_terminal_environment, register_task_env_overrides
 
     board = (os.environ.get("HERMES_KANBAN_BOARD") or "").strip() or None
     profile = (
@@ -234,16 +253,17 @@ def prepare_project_workspace_from_env() -> Optional[str]:
         task = kb.get_task(conn, task_id)
         if task is None:
             raise ValueError(f"Kanban task {task_id!r} disappeared before workspace preflight")
-        meta = dict(kb.read_board_metadata(board))
-        # The dispatcher snapshots the task's execution root into the worker
-        # environment. It remains authoritative if the shared Board is rebound
-        # before this already-created task starts.
-        meta["default_workdir"] = project_root
-        if task.project_id:
-            meta["project_id"] = task.project_id
-        project_slug = (os.environ.get("HERMES_KANBAN_PROJECT_SLUG") or "").strip()
-        if project_slug:
-            meta["project_slug"] = project_slug
+        stored_root = str(getattr(task, "workspace_root", None) or "").strip()
+        if stored_root and stored_root != project_root:
+            raise ValueError(f"Kanban task {task_id!r} workspace provenance does not match worker launch")
+        meta = {
+            "default_workdir": stored_root or project_root,
+            "project_id": task.project_id,
+            "project_slug": getattr(task, "workspace_project_slug", None),
+            "source_profile": getattr(task, "workspace_source_profile", None),
+            "default_workspace_kind": task.workspace_kind,
+            "filesystem_local": getattr(task, "workspace_filesystem_local", None),
+        }
         try:
             env = acquire_terminal_environment(task_id=task_id)
             workspace, branch = materialize_project_workspace(task, meta, env, profile=profile)
@@ -262,6 +282,11 @@ def prepare_project_workspace_from_env() -> Optional[str]:
         kbw.set_workspace_path(conn, task_id, workspace)
         if branch:
             kbw.set_branch_name(conn, task_id, branch)
+
+    # Keep cwd keyed to this worker task.  The environment may be a cached,
+    # profile-shared instance, so register_task_env_overrides deliberately does
+    # not mutate its shared ``env.cwd`` compatibility attribute.
+    register_task_env_overrides(task_id, {"cwd": workspace})
 
     os.environ["HERMES_KANBAN_WORKSPACE"] = workspace
     if branch:

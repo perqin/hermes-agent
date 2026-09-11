@@ -163,19 +163,20 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
 
 
 def _backend_owned_project_binding(task: "Task", board: Optional[str]) -> Optional[dict]:
-    """Return board metadata requiring assignee-side workspace preflight.
-
-    Every Project binding is checked in the assignee environment regardless of
-    the source profile's locality.  A direct non-local Board directory receives
-    the same treatment when the task inherited that exact backend path.
-    """
-    meta = _kb.read_board_metadata(board)
-    if (
-        getattr(task, "project_id", None)
-        and meta.get("project_id") == task.project_id
-        and meta.get("default_workdir")
-    ):
-        return meta
+    """Return immutable task provenance requiring assignee-side preflight."""
+    del board  # Board binding may have changed since task creation.
+    root = str(getattr(task, "workspace_root", None) or "").strip()
+    if getattr(task, "workspace_requires_preflight", False) and root:
+        return {
+            "project_id": getattr(task, "project_id", None),
+            "project_slug": getattr(task, "workspace_project_slug", None),
+            "source_profile": getattr(task, "workspace_source_profile", None),
+            "default_workdir": root,
+            "default_workspace_kind": getattr(task, "workspace_kind", None),
+            "filesystem_local": getattr(task, "workspace_filesystem_local", None),
+        }
+    # Conservative compatibility for pre-provenance Project worktrees: their
+    # root is derivable from the immutable task path without mutable Board state.
     if getattr(task, "project_id", None) and getattr(task, "workspace_kind", None) == "worktree":
         from hermes_cli.kanban_project_paths import worktree_root_for_task
 
@@ -192,13 +193,16 @@ def _backend_owned_project_binding(task: "Task", board: Optional[str]) -> Option
                 "default_workspace_kind": "worktree",
                 "filesystem_local": None,
             }
-    if meta.get("filesystem_local") is False and meta.get("default_workdir"):
-        kind = getattr(task, "workspace_kind", None)
-        workspace = str(getattr(task, "workspace_path", "") or "")
-        if kind == "dir" and workspace:
-            return meta
-        if kind == "worktree" and workspace:
-            return meta
+    if getattr(task, "project_id", None) and getattr(task, "workspace_kind", None) == "dir":
+        legacy_path = str(getattr(task, "workspace_path", "") or "").strip()
+        if legacy_path:
+            return {
+                "project_id": task.project_id,
+                "project_slug": None,
+                "default_workdir": legacy_path,
+                "default_workspace_kind": "dir",
+                "filesystem_local": None,
+            }
     return None
 
 

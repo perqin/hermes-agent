@@ -773,6 +773,10 @@ export const es: Translations = {
     workspacePathDir: "ruta del workspace (obligatoria, p. ej. ~/projects/my-app)",
     workspacePathOptional:
       "ruta del workspace (opcional, derivada del asignado si está vacía)",
+    projectDirectoryExplanation:
+      "La ruta absoluta se resuelve al guardar en el entorno de terminal del perfil de esta solicitud.",
+    projectDirectoryPending: "Validando el directorio del proyecto en el entorno de terminal…",
+    projectDirectoryValidationError: "No se pudo validar el directorio del proyecto: {error}",
     logTruncated: "(mostrando los últimos 100 KB — registro completo en ",
     logAt: ")",
   },

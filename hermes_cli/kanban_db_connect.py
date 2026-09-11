@@ -813,6 +813,12 @@ _LATER_TASK_COLUMNS = (
     # Typed block reason (VALID_BLOCK_KINDS); NULL = generic human blocker.
     ("block_kind", "block_kind TEXT"),
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
+    # Immutable backend workspace provenance for dispatch/preflight/cleanup.
+    ("workspace_root", "workspace_root TEXT"),
+    ("workspace_requires_preflight", "workspace_requires_preflight INTEGER NOT NULL DEFAULT 0"),
+    ("workspace_filesystem_local", "workspace_filesystem_local INTEGER"),
+    ("workspace_source_profile", "workspace_source_profile TEXT"),
+    ("workspace_project_slug", "workspace_project_slug TEXT"),
 )
 
 _NOTIFY_SUB_COLUMNS = (

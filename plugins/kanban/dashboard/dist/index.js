@@ -2211,7 +2211,7 @@
         name: name.trim() || autoName || undefined,
         description: description.trim() || undefined,
         icon: icon.trim() || undefined,
-        default_workdir: projectDirectory.trim() || undefined,
+        default_workdir: projectDirectory.trim() ? projectDirectory : undefined,
         switch: switchTo,
       }).catch(function (e) {
         setErr(parseApiErrorMessage(e));
@@ -2289,7 +2289,12 @@
             h("div", { className: "text-xs text-muted-foreground" },
               tx(t, "projectDirectoryExplanation",
                 "The absolute path is resolved in this request profile's terminal environment when saved.")),
-            err ? h("div", { className: "text-xs text-destructive", role: "alert" }, err) : null,
+            submitting ? h("div", { className: "text-xs text-muted-foreground", role: "status" },
+              tx(t, "projectDirectoryPending",
+                "Validating the project directory in the terminal environment…")) : null,
+            err ? h("div", { className: "text-xs text-destructive", role: "alert" },
+              tx(t, "projectDirectoryValidationError",
+                "Project directory validation failed: {error}", { error: err })) : null,
           ),
           h("div", { className: "flex flex-col gap-1" },
             h(Label, { className: "text-xs" }, tx(t, "icon", "Icon"), " ",
@@ -2350,7 +2355,7 @@
       props.onSave({
         name: name.trim() || undefined,
         description: description.trim() || undefined,
-        default_workdir: projectDirectory.trim(),
+        default_workdir: projectDirectory.trim() ? projectDirectory : "",
       }).catch(function (e) {
         setErr(parseApiErrorMessage(e));
         setSubmitting(false);
@@ -2404,9 +2409,14 @@
               spellCheck: false,
             }),
             h("div", { className: "text-xs text-muted-foreground" },
-              tx(t, "projectDirectoryOverrideHint",
-                "The absolute path is resolved in this request profile's terminal environment when saved; new tasks inherit it unless explicitly overridden.")),
-            err ? h("div", { className: "text-xs text-destructive", role: "alert" }, err) : null,
+              tx(t, "projectDirectoryExplanation",
+                "The absolute path is resolved in this request profile's terminal environment when saved.")),
+            submitting ? h("div", { className: "text-xs text-muted-foreground", role: "status" },
+              tx(t, "projectDirectoryPending",
+                "Validating the project directory in the terminal environment…")) : null,
+            err ? h("div", { className: "text-xs text-destructive", role: "alert" },
+              tx(t, "projectDirectoryValidationError",
+                "Project directory validation failed: {error}", { error: err })) : null,
           ),
         ),
         h("div", { className: "hermes-kanban-dialog-actions" },
@@ -3190,6 +3200,7 @@
     const defaultWorkspaceKind = props.defaultWorkspaceKind || "scratch";
     const defaultWorkspacePath = props.defaultWorkspacePath || "";
     const [workspaceKind, setWorkspaceKind] = useState(defaultWorkspaceKind);
+    const [workspaceKindDirty, setWorkspaceKindDirty] = useState(false);
     const [workspacePath, setWorkspacePath] = useState(defaultWorkspacePath);
     const [workspacePathDirty, setWorkspacePathDirty] = useState(false);
     // Goal-mode: when on, the dispatched worker runs the Ralph-style /goal
@@ -3218,13 +3229,13 @@
         .map(function (s) { return s.trim(); })
         .filter(function (s) { return s.length > 0; });
       if (skillList.length > 0) body.skills = skillList;
-      // Only send workspace_kind when it's non-default. Keeps the request
-      // shape small and interoperable with older dispatcher versions.
-      if (workspaceKind && workspaceKind !== "scratch") {
-        body.workspace_kind = workspaceKind;
+      // Omission means inherit the Board/Project workspace. Once the user
+      // changes the selector, every value is explicit — including scratch.
+      if (workspaceKindDirty) {
+        if (workspaceKind === "scratch") body.workspace_kind = "scratch";
+        else if (workspaceKind) body.workspace_kind = workspaceKind;
       }
-      const wpTrim = workspacePath.trim();
-      if (workspacePathDirty) body.workspace_path = wpTrim;
+      if (workspacePathDirty) body.workspace_path = workspacePath;
       // Goal-mode toggle. Only send the keys when enabled so the request
       // shape stays small and old dispatchers ignore it cleanly.
       if (goalMode) {
@@ -3234,7 +3245,8 @@
       }
       props.onSubmit(body);
       setTitle(""); setAssignee(""); setPriority(0); setParent(""); setSkills("");
-      setWorkspaceKind(defaultWorkspaceKind); setWorkspacePath(defaultWorkspacePath); setWorkspacePathDirty(false);
+      setWorkspaceKind(defaultWorkspaceKind); setWorkspaceKindDirty(false);
+      setWorkspacePath(defaultWorkspacePath); setWorkspacePathDirty(false);
       setGoalMode(false); setGoalMaxTurns("");
     };
 
@@ -3331,7 +3343,10 @@
                 value: workspaceKind,
                 title: "Choose whether task files are temporary or preserved after completion.",
                 className: "h-8 text-sm flex-1",
-              }, selectChangeHandler(setWorkspaceKind)),
+              }, selectChangeHandler(function (value) {
+                setWorkspaceKind(value);
+                setWorkspaceKindDirty(true);
+              })),
                 h(SelectOption, { value: "scratch" },
                   tx(t, "workspaceScratch", "Temporary — deleted on completion")),
                 h(SelectOption, { value: "worktree" },

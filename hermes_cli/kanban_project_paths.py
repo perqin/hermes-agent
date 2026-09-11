@@ -12,9 +12,15 @@ import ntpath
 import posixpath
 from pathlib import Path
 import shlex
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 _GIT_MARKER = "__HERMES_KANBAN_GIT__="
+
+
+def _result_field(result: Any, name: str, default: Any = None) -> Any:
+    if isinstance(result, Mapping):
+        return result.get(name, default)
+    return getattr(result, name, default)
 
 
 def worktree_root_for_task(path: str, task_id: str) -> Optional[str]:
@@ -75,21 +81,33 @@ def resolve_project_directory(
             workspace_kind = "dir"
     else:
         command = (
-            f"if git -C {shlex.quote(canonical)} rev-parse --is-inside-work-tree >/dev/null 2>&1; "
-            f"then printf '%s%s\\n' {shlex.quote(_GIT_MARKER)} true; "
-            f"else printf '%s%s\\n' {shlex.quote(_GIT_MARKER)} false; fi"
+            f"git -C {shlex.quote(canonical)} rev-parse --is-inside-work-tree >/dev/null 2>&1; "
+            "git_rc=$?; "
+            f"if [ \"$git_rc\" -eq 0 ]; then printf '%s%s\\n' {shlex.quote(_GIT_MARKER)} true; "
+            f"elif [ \"$git_rc\" -eq 128 ]; then printf '%s%s\\n' {shlex.quote(_GIT_MARKER)} false; "
+            "else exit \"$git_rc\"; fi"
         )
-        result = env.execute(
-            command,
-            timeout=30,
-            rewrite_compound_background=False,
-        )
-        marked = [
-            line[len(_GIT_MARKER):]
-            for line in str(result.get("output") or "").splitlines()
-            if line.startswith(_GIT_MARKER)
-        ]
-        if int(result.get("returncode", 1)) == 0 and marked == ["true"]:
+        try:
+            result = env.execute(
+                command,
+                timeout=30,
+                rewrite_compound_background=False,
+            )
+            marked = [
+                line[len(_GIT_MARKER):]
+                for line in str(_result_field(result, "output", "") or "").splitlines()
+                if line.startswith(_GIT_MARKER)
+            ]
+            returncode = int(_result_field(result, "returncode", 1))
+        except Exception:
+            raise ValueError(
+                f"Could not determine Git workspace kind for Project directory {raw!r}"
+            ) from None
+        if returncode != 0 or len(marked) != 1 or marked[0] not in {"true", "false"}:
+            raise ValueError(
+                f"Could not determine Git workspace kind for Project directory {raw!r}"
+            )
+        if marked[0] == "true":
             workspace_kind = "worktree"
 
     return {

@@ -882,6 +882,10 @@ export const en: Translations = {
     boardSettingsTitleFor: "Board settings — {name}",
     projectDirectoryExplanation:
       "The absolute path is resolved in this request profile's terminal environment when saved.",
+    projectDirectoryPending:
+      "Validating the project directory in the terminal environment…",
+    projectDirectoryValidationError:
+      "Project directory validation failed: {error}",
     projectDirectoryOverrideHint:
       "New tasks inherit this as their workspace default; each task can still override it in the create dialog.",
     saving: "Saving…",

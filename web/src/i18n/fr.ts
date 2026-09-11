@@ -773,6 +773,10 @@ export const fr: Translations = {
     workspacePathDir: "chemin du workspace (requis, par ex. ~/projects/my-app)",
     workspacePathOptional:
       "chemin du workspace (facultatif, dérivé de l'assigné si vide)",
+    projectDirectoryExplanation:
+      "Le chemin absolu est résolu lors de l’enregistrement dans l’environnement de terminal du profil de cette requête.",
+    projectDirectoryPending: "Validation du répertoire du projet dans l’environnement de terminal…",
+    projectDirectoryValidationError: "Échec de la validation du répertoire du projet : {error}",
     logTruncated: "(affichage des derniers 100 KB — log complet à ",
     logAt: ")",
   },

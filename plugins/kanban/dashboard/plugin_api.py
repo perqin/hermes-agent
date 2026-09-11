@@ -1449,13 +1449,25 @@ def create_board_endpoint(payload: CreateBoardBody):
 def rename_board(slug: str, payload: RenameBoardBody):
     """Update display metadata / default workdir / project scope (slug is immutable)."""
     normed = _existing_board_slug(slug)
+    old_meta = kanban_db.read_board_metadata(normed)
     workspace: dict[str, Any] = {}
     if payload.default_workdir is not None:
-        raw = payload.default_workdir.strip()
-        workspace = _validate_workdir(raw) if raw else {
+        workspace = _validate_workdir(payload.default_workdir) if payload.default_workdir.strip() else {
             "default_workdir": "",
             "default_workspace_kind": "",
         }
+        if (
+            payload.project_id is None
+            and old_meta.get("project_id")
+            and workspace.get("default_workdir") != old_meta.get("default_workdir")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A Project-bound board cannot change default_workdir independently; "
+                    "explicitly unbind the Project in the same update first."
+                ),
+            )
 
     project_id: Optional[str] = None
     project_slug: Optional[str] = None
@@ -1496,23 +1508,36 @@ def rename_board(slug: str, payload: RenameBoardBody):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
     elif payload.project_id == "":
-        old_meta = kanban_db.read_board_metadata(normed)
-        path = kanban_db.board_metadata_path(normed)
-        before = path.read_bytes() if path.exists() else None
-        meta = kanban_db.write_board_metadata(normed, **write_kwargs)
         old_project_id = old_meta.get("project_id")
         old_source = old_meta.get("source_profile")
         if old_project_id:
             from hermes_cli.profiles import get_active_profile_name
-            if old_source == (get_active_profile_name() or "default"):
-                from hermes_cli import projects_db as pdb
+            active_profile = get_active_profile_name() or "default"
+            if old_source != active_profile:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Board binding belongs to source profile {old_source!r}; "
+                        f"profile {active_profile!r} cannot unbind it."
+                    ),
+                )
+            from hermes_cli import projects_db as pdb
+            from hermes_cli.kanban_project_binding import reciprocal_project_unbind
+
+            try:
                 with pdb.connect_closing() as pconn:
                     old_project = pdb.get_project(pconn, old_project_id)
-                    if old_project is not None and old_project.board_slug == normed:
-                        if not pdb.update_project(pconn, old_project.id, board_slug=""):
-                            if before is not None:
-                                path.write_bytes(before)
-                            raise HTTPException(status_code=400, detail="Project disappeared during board unbind")
+                    if old_project is None or old_project.board_slug != normed:
+                        raise ValueError("Project binding is no longer reciprocal")
+                    with reciprocal_project_unbind(pconn, old_project, normed):
+                        meta = kanban_db.write_board_metadata(normed, **write_kwargs)
+            except Exception as exc:
+                detail = str(exc) if isinstance(exc, ValueError) else (
+                    "Project store is unavailable during board unbind"
+                )
+                raise HTTPException(status_code=400, detail=detail) from None
+        else:
+            meta = kanban_db.write_board_metadata(normed, **write_kwargs)
     else:
         meta = kanban_db.write_board_metadata(normed, **write_kwargs)
     return {"board": _annotate_board_meta(meta)}
