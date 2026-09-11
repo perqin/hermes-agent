@@ -231,6 +231,7 @@
 5. Keep the wire provider-neutral. Do not return a frontend decision based on names such as `docker` or `ssh`; the frontend combines `filesystem_scope` with its own connection mode to choose native picker, gateway-host picker, or text entry.
 6. In Desktop, cache the result by exact gateway connection plus profile and invalidate/refetch on profile switch, gateway reconnect, or terminal-backend change. While loading, after failure, and against an older backend missing the capability method, default to text entry rather than opening a picker on an unproven filesystem.
 7. Add one profile-isolation test with local profile A and plugin-remote profile B, plus a missing-capability compatibility test proving the result is explicitly `unknown` rather than guessed from a backend string.
+8. Keep this metadata-only RPC out of `_LONG_HANDLERS`; it must not acquire an environment. The mutation path remains authoritative and long-running. If implementation cannot derive locality without environment creation, drop the metadata optimization, acquire through Task 1, and register the RPC as long-running rather than adding a second backend classification.
 
 **Acceptance:** Every Project path-entry surface can decide whether browsing the controller/gateway filesystem is valid for the exact active profile, while submit-time backend resolution remains the source of truth.
 
@@ -263,6 +264,7 @@
 **Files:**
 
 - Modify: `hermes_cli/projects_db.py`
+- Modify: `tui_gateway/methods_projects.py`
 - Modify: `tui_gateway/project_tree.py`
 - Modify as required by the exact call chain: `agent/runtime_cwd.py`
 - Preserve unless a regression test proves otherwise: `tui_gateway/session_workdir.py`
@@ -275,8 +277,9 @@
 1. Reuse the path-style-aware comparison utility from Task 3 in `project_for_path`; do not normalize a canonical remote cwd through the controller OS.
 2. Audit the Project-created/switch workspace chain for controller `Path.expanduser`, `Path.is_dir`, `os.path.abspath`, and `os.path.isdir` checks. Local environments keep those checks; non-local environments trust only paths already validated by the Project resolver or validate through that environment.
 3. Keep `tui_gateway/session_workdir.py`'s existing precedence where an explicit remote session cwd wins over the global configured cwd. Do not redesign or weaken this working rule.
-4. Ensure `projects.for_cwd`, session status, sidebar grouping, and `_project_info_for_cwd` can match a remote canonical cwd without probing the controller filesystem.
-5. Add one end-to-end invariant test: a remote-only canonical folder can be stored, adopted as the intended session cwd, and matched back to its Project while every controller-local existence probe is set to fail if called.
+4. Make `projects.for_cwd` canonicalize its candidate in the requested profile's terminal environment before ownership lookup and return that canonical `cwd`. For non-local filesystems, run any Git branch probe through the same environment or omit the optional branch; never call controller-side `_completion_cwd` or `git_probe.branch(remote_path)`.
+5. Ensure session status, sidebar grouping, and `_project_info_for_cwd` can match a remote canonical cwd without probing the controller filesystem.
+6. Add one end-to-end invariant test: a remote-only alias can be resolved by `projects.for_cwd`, returned as canonical cwd, adopted as the intended session cwd, and matched back to its Project while every controller-local existence/Git probe is set to fail if called.
 
 **Acceptance:** Correct remote storage is not undone by a later host-local check, and local deleted-cwd healing remains unchanged.
 
@@ -295,7 +298,7 @@
 **Steps:**
 
 1. Treat binding as a snapshot operation. Resolve the Project primary path through the Project owner's terminal environment first, then write the canonical value to board `default_workdir`.
-2. Persist enough additive board metadata to use the binding without opening an assignee profile's `projects.db`: canonical `project_id`, Project slug/branch prefix, source profile identity, and canonical `default_workdir`. Do not persist a built-in backend name or provider config snapshot.
+2. Persist enough additive board metadata to use the binding without opening an assignee profile's `projects.db`: canonical `project_id`, Project slug/branch prefix, source profile identity, canonical `default_workdir`, and any backend-resolved Git/workspace-kind fact needed by list/task UI. Do not persist a built-in backend name or provider config snapshot.
 3. Make CLI `project bind-board` and Dashboard board binding write the same reciprocal metadata. A successful bind must update both the Project's `board_slug` and the Board's binding snapshot; do not keep the current best-effort exception swallowing that can report a one-sided bind.
 4. When a board-scoped task omits an explicit Project/workspace, derive its Project identity, deterministic branch, and desired `<default_workdir>/.worktrees/<task-id>` path from this snapshot. The assignee does not need a matching Project row; it needs filesystem reachability.
 5. Keep explicit `--project` resolution fail-closed in the creator profile. The board snapshot is inheritance for a bound board, not a fallback that silently substitutes a different Project for an unresolved explicit request.
@@ -348,6 +351,7 @@
 - Modify: `apps/desktop/src/i18n/types.ts`
 - Modify: `apps/desktop/src/i18n/{en,zh,zh-hant,ja,ru,ar}.ts`
 - Test: `apps/desktop/src/store/projects.test.ts`
+- Test: `apps/desktop/src/lib/desktop-fs.test.ts`
 - Test: `apps/desktop/src/app/chat/sidebar/project-dialog.test.tsx`
 - Add/Test if required by the shared entry flow: `apps/desktop/src/app/chat/sidebar/project-path-dialog.tsx` and its test
 
@@ -360,13 +364,16 @@
 2. Keep connection locality in `desktop-fs.ts` limited to selecting native versus gateway-host browsing. It must no longer answer whether the active profile's terminal backend owns that filesystem.
 3. Load the Task 6 capability for the exact captured gateway/profile when Project UI opens. Disable any browse action while capability is unresolved, and use text mode if lookup fails or the backend predates the capability RPC. Never infer from `local`/`docker`/`ssh` strings.
 4. In `ProjectDialog`, retain the existing browse-and-list workflow for filesystem-local profiles. For non-local profiles, render an unnormalized path input plus explicit Add action (Enter is equivalent); support `~`, relative, POSIX, and provider-defined syntax without host-side `path` helpers. Do not derive the Project name with controller-platform basename rules; retain/use the dialog's explicit name field. Creating a Project batches the entered folders and validates all of them atomically only on the final `projects.create` submission; add-folder mode validates on `projects.add_folder` submission.
-5. Route `openFolderAsProject()` through the same shared path-acquisition policy. This covers sidebar actions, menu integrations, keybindings, and command-palette entrypoints that currently bypass `ProjectDialog`; a non-local profile must receive a reusable path prompt instead of opening either filesystem picker.
+5. Route `openFolderAsProject()` through the same shared path-acquisition policy. Calls without a supplied path (sidebar/menu/keybinding/fixed palette command) open the picker or reusable text prompt selected by capability; a command-palette item that already supplies a path skips acquisition but still uses backend canonicalization. Do not duplicate locality checks across entrypoints.
 6. Do not call the gateway-host `/api/fs` list/default-cwd endpoints for a terminal-non-local profile. They describe the gateway filesystem, not the configured terminal environment.
 7. Keep the raw input visible and the dialog open while the RPC is pending and after a validation error. Surface the backend's profile-scoped resolution error inline, preserve the user's text for correction, prevent duplicate submit, and provide accessible labels/focus behavior for the new field.
-8. Change `addProjectFolder` and create/open flows to consume the existing authoritative `{project: ProjectInfo}` RPC response. On success, replace optimistic/raw cache entries, active Project state, and tree primary path with backend-returned canonical values before background reconciliation.
-9. Preserve stale-backend detection, captured-profile routing, reconnect-generation guards, and rollback behavior. A profile/gateway change while a dialog is open clears or closes the pending request rather than submitting the path under a different environment.
-10. Add Vitest cases for all three entry modes, capability loading/failure, non-local paths never invoking native or `/api/fs` pickers, every `openFolderAsProject` entrypoint using text mode, raw `../repo` submitted unchanged, canonical `/workspace/repo` replacing it on success, error text/input retention on rejection, duplicate-submit prevention, and profile-switch capability invalidation.
-11. Add localized labels, placeholders, explanation, validation-pending copy, and backend-error affordances to every shipped Desktop locale; keep backend names out of user-facing copy.
+8. Capture `{gateway, profile, generation}` when the dialog/path prompt opens and use that route for capability lookup and mutation. A live profile swap must not redirect profile A's typed path into profile B's Project DB/environment.
+9. Change `addProjectFolder` and create/open flows to consume authoritative RPC responses. On success, replace optimistic/raw cache entries, active Project state, tree primary path, and any newly launched session cwd with backend-returned canonical values before background reconciliation.
+10. In `openFolderAsProject`, use the canonical `cwd` returned by `projects.for_cwd`, or the created Project's canonical `primary_path`, when entering/creating a session. A non-local resolution/create failure stops the operation; the existing raw-path plain-workspace fallback is allowed only when capability is explicitly local.
+11. Keep `setProjectAppearance` auto-adoption on the same canonicalizing `projects.create` route; it needs regression coverage but no additional path-entry UI.
+12. Preserve stale-backend detection, captured-profile routing, reconnect-generation guards, and rollback behavior. A profile/gateway change while a dialog is open clears or closes the pending request rather than submitting the path under a different environment.
+13. Add Vitest cases for all three entry modes, capability loading/failure, non-local paths never invoking native or `/api/fs` pickers, direct-path versus no-path `openFolderAsProject` entrypoints, raw `../repo` submitted unchanged, canonical `/workspace/repo` replacing it in cache/session cwd on success, remote failure never launching a raw cwd, error text/input retention, duplicate-submit prevention, and profile-switch capability invalidation.
+14. Add localized labels, placeholders, explanation, validation-pending copy, and backend-error affordances to every shipped Desktop locale; keep backend names out of user-facing copy.
 
 **Acceptance:** A Desktop user can only browse a filesystem proven to be the active profile's terminal filesystem; non-local Project paths are entered as text, validated by the mutation RPC, and replaced with the server-returned canonical path.
 
@@ -381,19 +388,23 @@
 - Modify: `web/src/i18n/types.ts`
 - Modify: `web/src/i18n/{en,af,ar,de,es,fr,ga,hu,it,ja,ko,pt,ru,tr,uk,zh,zh-hant}.ts`
 - Test: `tests/plugins/test_kanban_board_project_api.py`
-- Verify/no standalone Project CRUD change: `web/src/pages/Chat.tsx` and the Web route inventory
+- Test: `tests/plugins/test_kanban_dashboard_plugin.py`
+- Verify/no standalone Project CRUD change: `web/src/pages/ChatPage.tsx` and the Web route inventory
 
 **Steps:**
 
 1. Record the audited scope in implementation notes/tests: the React Web dashboard currently has no standalone Project-management page; `/chat` embeds the TUI. Do not add a speculative second Project store or browser file picker. The structured Web surface affected here is the Kanban dashboard's Board create/settings Project-directory field.
-2. Keep that field as text for both local and non-local server filesystems: a browser cannot safely open a system picker for the gateway or terminal backend. Update its helper copy to state that the path is resolved in the active profile's terminal environment when saved.
+2. Keep the existing Project-directory field as text for both local and non-local server filesystems: a browser cannot safely open a system picker for the gateway or terminal backend. Update its helper copy to state that an absolute path is resolved in the Dashboard request profile's terminal environment when saved. Use trimming only to detect blank/clear; submit non-blank path text without frontend normalization.
 3. Replace `plugin_api.py:_validate_workdir` controller-only handling with the shared backend-aware resolver and a `require_absolute_existing_directory` policy. Preserve the current strict local Board-workdir behavior; for non-local filesystems perform the equivalent absolute/directory/canonical checks in the terminal environment. Do not duplicate shell quoting, provider lookup, or backend classification in the plugin.
-4. Resolve direct `default_workdir` input before Board metadata mutation. A selected `project_id` uses the Project's already-canonical primary path and verifies access through the same profile environment before binding. If both are supplied, preserve the existing explicit-workdir precedence but validate the effective path exactly once.
-5. Return the canonical effective `default_workdir` in create/update responses. The dashboard replaces local form state and refreshed Board metadata from that response; it must not keep the raw entry after success.
-6. On failure, return a stable HTTP 400 validation error without writing partial Board metadata. Keep the create/settings dialog open, preserve the entered path, render the server message beside the field, restore focus, and prevent duplicate submissions while resolution is pending.
-7. Bind resolution to the dashboard server/request profile that owns the Project lookup; never infer compatibility from the Board creator, task assignee, or backend name. Worker-side accessibility remains the Task 9/10 invariant and is rechecked when an assignee materializes a task.
-8. Add API tests for local compatibility, plugin-remote canonicalization, missing/file/unreachable path rejection, Project binding, explicit-workdir precedence, no partial write, and controller `Path` probes being forbidden for remote paths. Add dashboard behavior coverage at the existing feasible JS test layer; if the checked-in plugin has no source test harness, exercise the HTTP contract in Python and document the manual create/settings UI smoke test rather than inventing a parallel build system.
-9. Add/update Kanban translation keys for helper, pending, and validation-error text in every shipped Web locale; do not rely on English fallbacks for new permanent UI.
+4. Do not add a Project selector or a new client-supplied `source_profile` field in this change. The existing `GET /projects` and `project_id` API capability remains untouched by the frontend; Project binding continues through existing CLI/server flows, where the server derives and snapshots source profile from the invocation context.
+5. Resolve direct `default_workdir` input before Board metadata mutation using the Dashboard request profile. A Project path already inherited from a server-side binding uses the binding snapshot and is rechecked by the worker contract in Tasks 9/10. Run potentially cold environment work through the plugin's existing executor/async pattern rather than blocking the event loop.
+6. Move `_default_workspace_kind()` off controller-local Git probing. Resolve Git/workspace kind when the path is created/bound in its terminal environment and persist/read the additive Board snapshot from Task 9; legacy remote/unknown rows must not call host Git as a fallback.
+7. Return the canonical effective `default_workdir` and workspace kind in create/update responses. The dashboard replaces local form state and refreshed Board metadata from that response; it must not keep the raw entry after success.
+8. On failure, return a stable HTTP 400 validation error without writing partial Board metadata. Keep the create/settings dialog open, preserve the entered path, render the server message beside the field, restore focus, and prevent duplicate submissions while resolution is pending.
+9. In task creation, distinguish inherited Board workspace from a user override. Initializing the field from `default_workdir` must not cause the UI to send `workspace_path`; track dirty/override state and omit untouched values so backend Project binding can derive the deterministic worktree. Send `workspace_path` only after the user explicitly edits/overrides it.
+10. Worker-side accessibility remains the Task 9/10 invariant and is rechecked when an assignee materializes a task; do not infer compatibility from creator, assignee, or backend-name equality.
+11. Add API tests for local compatibility, plugin-remote canonicalization, missing/file/unreachable path rejection, no partial write, persisted workspace kind, and controller `Path`/Git probes being forbidden for remote paths. Add checked-in bundle contract tests for canonical/error handling and inherited-versus-overridden `workspace_path`; `dist/index.js` is the in-repo plugin source artifact, so do not invent a parallel build system.
+12. Add/update Kanban translation keys for helper, pending, and validation-error text in every shipped Web locale; do not rely on English fallbacks for new permanent UI.
 
 **Acceptance:** The Web/Kanban dashboard never validates a backend-owned directory against the web-server host, reports terminal-environment failures without losing input, and persists/displays the canonical backend path returned by the server.
 
@@ -416,7 +427,7 @@
 5. Document the binding contract: a Board bound to a Project uses the Project's canonical backend path, and every assignee profile must be configured to access the same durable/shared filesystem.
 6. Document dispatch failure when an assignee cannot access or canonicalize the bound path; do not imply that matching backend names are required or sufficient.
 7. Document Desktop's locality-aware path entry: native/gateway picker only when the profile's terminal filesystem matches it, otherwise remote path text input followed by server validation.
-8. Document that the Web/Kanban dashboard accepts a path string and resolves it in the dashboard profile's terminal environment rather than the browser or web-server host.
+8. Document that the Web/Kanban dashboard's existing directory field resolves its path in the Dashboard request profile's terminal environment rather than the browser or web-server host. Do not document a new Project selector.
 9. Keep wording provider-neutral; do not enumerate built-in backends.
 
 ---
@@ -431,12 +442,13 @@
 - **Plugin provider:** a provider name unknown to core is correctly classified through environment/provider capabilities.
 - **Reference operations:** canonical stored paths can be set primary or removed; a deleted remote folder can still be removed by its exact stored path.
 - **RPC scheduling:** every potentially remote Project mutation is dispatched through `_LONG_HANDLERS` and does not block the JSON-RPC reader.
-- **Downstream consumption:** a remote-only folder can become the intended session cwd and match back to its Project with controller-local filesystem probes forbidden.
+- **Downstream consumption:** `projects.for_cwd` canonicalizes a remote alias in the target environment, returns that canonical cwd, and can match it back to its Project with controller-local filesystem/Git probes forbidden.
 - **Desktop local connection + local filesystem:** native picker remains in use and local Project semantics are unchanged.
 - **Desktop remote connection + local filesystem:** the gateway-host browser remains in use because it addresses the same filesystem as the active profile.
-- **Desktop non-local/unknown filesystem:** create, add-folder, and open-folder entrypoints show text input and never call native or gateway-host filesystem pickers; raw input is replaced by authoritative canonical response, while rejected input remains editable.
+- **Desktop non-local/unknown filesystem:** create/add-folder and no-path open-folder entrypoints show text input and never call native or gateway-host filesystem pickers; direct-path commands submit without browsing; raw input is replaced by authoritative canonical response, while rejected input remains editable.
 - **Desktop profile switch:** cached locality and pending path operations cannot cross gateway/profile generations.
-- **Web/Kanban dashboard:** create/settings text input persists the canonical terminal-environment result, shows backend validation failures without closing, and performs no controller `Path` probe for remote paths.
+- **Web/Kanban dashboard:** the existing create/settings directory input persists canonical terminal-environment results, shows failures without closing, and performs no controller `Path`/Git probe for remote paths; no new Project selector or client-controlled source-profile field is introduced.
+- **Kanban task inheritance:** an untouched prefilled Board directory is omitted as `workspace_path` so Project binding derives a worktree; only a user-edited override is sent explicitly.
 - **Cross-platform:** remote POSIX canonical paths are never fed into host-native `abspath`/`normcase` after resolution.
 - **Bound Board inheritance:** a profile-A Project binding gives new Board tasks a self-contained canonical root/project slug without requiring the assignee profile to own the same Project row.
 - **Shared backend success:** profile B reaches profile A's canonical root in its own environment, materializes the deterministic worktree there, and runs with that worktree as authoritative cwd.
@@ -456,7 +468,10 @@ scripts/run_tests.sh \
   tests/tools/test_desktop_tools_diet.py \
   tests/agent/test_runtime_cwd.py \
   tests/hermes_cli/test_kanban_project_link.py \
-  tests/plugins/test_kanban_board_project_api.py
+  tests/plugins/test_kanban_board_project_api.py \
+  tests/plugins/test_kanban_dashboard_plugin.py
+
+node --check plugins/kanban/dashboard/dist/index.js
 
 cd apps/desktop
 npm test -- --run \
@@ -499,6 +514,9 @@ Do not run `uv build --wheel`; this change does not require package artifacts.
 13. **Profile cwd override:** task workspace remains authoritative after the child loads profile config; cover Docker auto-mount precedence explicitly.
 14. **Global Board loses Project context:** persist the source profile and Project slug/path snapshot at bind time so cross-profile workers do not need to resolve a per-profile Project row.
 15. **Partial reciprocal bind:** update Project and Board metadata as one reported operation with rollback/compensation; never swallow a Board write and print success.
+16. **Dashboard scope creep/profile spoofing:** do not add Project selection or a client-controlled `source_profile`; direct directory validation uses the established request profile, while server-side Project binding snapshots source profile from trusted invocation context.
+17. **Host Git misclassification:** persist backend-resolved workspace kind at bind/update and prohibit `_default_workspace_kind()` from probing remote paths on the controller during Board listing.
+18. **Inherited path becomes an override:** track task-form dirtiness and omit untouched `workspace_path`, otherwise the backend cannot derive the Project worktree.
 
 ## 6. Expected change set
 
@@ -513,6 +531,7 @@ Do not run `uv build --wheel`; this change does not require package artifacts.
 - `tools/terminal_tool_lifecycle.py` if acquisition logic is factored there
 - `tools/terminal_tool_backends.py`
 - `agent/terminal_env_provider.py`
+- `agent/terminal_env_registry.py`
 - `hermes_cli/projects_db.py`
 - `hermes_cli/projects_cmd.py`
 - `tui_gateway/methods_projects.py`
@@ -526,11 +545,25 @@ Do not run `uv build --wheel`; this change does not require package artifacts.
 - `hermes_cli/kanban_db_dispatch.py`
 - a narrow Kanban worker-bootstrap sibling selected during implementation
 - `plugins/kanban/dashboard/plugin_api.py`
+- `tests/plugins/test_kanban_board_project_api.py`
+- `tests/plugins/test_kanban_dashboard_plugin.py`
 
 **Client/docs modifications:**
 
+- `apps/desktop/src/types/hermes.ts`
+- `apps/desktop/src/lib/desktop-fs.ts`
+- `apps/desktop/src/lib/desktop-fs.test.ts`
 - `apps/desktop/src/store/projects.ts`
 - `apps/desktop/src/store/projects.test.ts`
+- `apps/desktop/src/app/chat/sidebar/project-dialog.tsx`
+- `apps/desktop/src/app/chat/sidebar/project-dialog.test.tsx`
+- `apps/desktop/src/app/chat/sidebar/index.tsx`
+- optional shared Project path prompt component/test selected during implementation
+- `apps/desktop/src/i18n/types.ts` and all six shipped locale files
+- `plugins/kanban/dashboard/dist/index.js`
+- `web/src/i18n/types.ts` and all shipped locale files
 - `website/docs/reference/cli-commands.md`
+- `website/docs/user-guide/desktop.md`
+- `website/docs/user-guide/features/kanban.md`
 
-No backend enumeration, provider-specific branch, or generated artifact should be added. Board metadata may gain additive Project-binding fields; the Kanban task schema should remain unchanged unless implementation proves that existing project/workspace/branch fields cannot carry the required provenance safely.
+No Project/frontend backend enumeration or provider-specific branch should be added. `plugins/kanban/dashboard/dist/index.js` is the checked-in plugin source artifact and may change directly; do not commit ignored `hermes_cli/web_dist`, Desktop build output, or package artifacts. Board metadata may gain additive Project-binding fields; the Kanban task schema should remain unchanged unless implementation proves that existing project/workspace/branch fields cannot carry the required provenance safely.
