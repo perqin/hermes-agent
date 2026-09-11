@@ -2,9 +2,9 @@
 
 > **For Hermes:** Implement this plan task-by-task, keeping each commit scoped and preserving the local-backend contract.
 
-**Goal:** Make Project folder paths canonical in the filesystem namespace that will consume them: preserve the current local behavior, but resolve and validate paths inside non-local terminal environments before writing them to the per-profile Projects database.
+**Goal:** Make Project folder paths canonical in their terminal-backend filesystem namespace and carry that namespace contract through Project-bound Kanban boards: preserve current local behavior, resolve non-local paths in the terminal environment, and require every assigned board worker profile to be able to access the same backend path.
 
-**Architecture:** Add one Project path resolver above `projects_db`. It acquires the configured terminal environment through the existing terminal runtime/factory, classifies filesystem locality from the environment capability (`env.is_local`) rather than a backend-name list, and either applies the existing host-local normalization or performs a bounded backend-side `cd` + `pwd -P`. All externally reachable Project folder mutations use this resolver before entering a database transaction; `projects_db` receives an explicit “already canonical” signal so a controller OS cannot reinterpret a remote path.
+**Architecture:** Add one Project path resolver above `projects_db`. It acquires the configured terminal environment through the existing terminal runtime/factory, classifies filesystem locality from the environment capability (`env.is_local`) rather than a backend-name list, and either applies the existing host-local normalization or performs a bounded backend-side `cd` + `pwd -P`. All externally reachable Project folder mutations use this resolver before entering a database transaction; `projects_db` receives an explicit “already canonical” signal so a controller OS cannot reinterpret a remote path. Binding a Project to a Kanban board snapshots the Project's canonical primary path as the board workspace contract. The dispatcher resolves and materializes a task workspace through the assignee profile's terminal environment; successful backend-side access is the proof that the profile satisfies the board contract.
 
 **Tech stack:** Python, argparse, SQLite, terminal `BaseEnvironment`/plugin providers, TUI/Desktop JSON-RPC, React/TypeScript nanostores, pytest, Vitest.
 
@@ -22,6 +22,7 @@
 - Profile-correct terminal configuration, credentials, environment cache identity, and error propagation for project RPCs.
 - Immediate Desktop reconciliation to the canonical path returned by the backend.
 - Project ownership/session-workspace consumers that would otherwise reinterpret or reject the newly canonical remote path on the controller host.
+- Project-bound Kanban board metadata, task workspace derivation, backend-side worktree materialization, and worker startup for a shared backend path.
 
 ### Required behavior
 
@@ -37,6 +38,11 @@
 10. **Compatibility:** labels, primary-folder promotion/demotion, duplicate `INSERT OR IGNORE`, active-project behavior, archived-project behavior, and RPC method/result shapes stay unchanged.
 11. **RPC responsiveness:** every Project mutation that may initialize or execute against a remote environment runs through the existing long-handler executor rather than blocking the JSON-RPC reader thread.
 12. **Canonical-path consumption:** once a remote path has been validated, session/project ownership code must compare and propagate it without controller-side `isdir`, `abspath`, `normcase`, or `os.sep` assumptions.
+13. **Board binding contract:** a bound board's `default_workdir` is the Project's canonical primary path in the Project owner's backend filesystem. It is not translated to a controller-host path.
+14. **Worker reachability contract:** every profile assigned work on that board must configure a terminal environment that can access the same canonical path. At dispatch, backend-side `cd`/canonicalization must prove reachability before worktree creation or worker execution; failure blocks the task with an actionable profile/path error.
+15. **Backend-side materialization:** local assignees retain the existing controller-local `Path`/Git/Popen flow. Non-local assignees create, inspect, and reuse Project worktrees through their terminal environment; the dispatcher must never run controller-local Git against a backend-owned path.
+16. **No backend identity enum:** the board need not persist a built-in backend name. Environment capability plus successful access to the canonical board path is the runtime compatibility check. Profiles are operationally required to target the same durable/shared backend filesystem.
+17. **Workspace authority:** the task-derived Project/board workspace overrides a profile's default `terminal.cwd`; the profile still supplies backend, image, mount, network, resource, credentials, and model/tool policy.
 
 ### Non-goals
 
@@ -45,7 +51,9 @@
 - Requiring a Project folder to be a Git repository.
 - Adding a Project-specific terminal backend manager or duplicating terminal configuration/factory logic.
 - Changing repository discovery or making local Project creation stricter.
-- Implementing remote Project-linked Kanban worktree materialization. The current Kanban dispatcher creates directories, runs Git, and starts workers on the controller host; that needs a separate execution-transport design rather than being implied by correct folder storage.
+- Proving backend equality by comparing provider names or serialized provider configuration. Reachability of the canonical bound path is the contract; providers remain free to expose the same filesystem through different configurations.
+- Making arbitrary unbound Kanban `dir`/`worktree` paths backend-aware. This plan covers paths derived from a Project-bound board; broader Kanban workspace transport can reuse the resulting mechanism later.
+- Automatically migrating existing materialized task workspaces when a Project primary path changes. Existing tasks retain their workspace snapshot; safe rebinding remains a separate explicit workflow.
 
 ---
 
@@ -237,7 +245,61 @@
 
 **Acceptance:** Correct remote storage is not undone by a later host-local check, and local deleted-cwd healing remains unchanged.
 
-### Task 8: Reconcile Desktop optimistic state with backend truth
+### Task 8: Make a Project-bound board carry a self-contained workspace contract
+
+**Objective:** Let a global Board use a per-profile Project path without requiring every assignee profile to duplicate the Project row.
+
+**Files:**
+
+- Modify: `hermes_cli/projects_cmd.py`
+- Modify: `hermes_cli/kanban_db.py`
+- Modify: `plugins/kanban/dashboard/plugin_api.py`
+- Test: `tests/hermes_cli/test_kanban_project_link.py`
+- Test: `tests/plugins/test_kanban_board_project_api.py`
+
+**Steps:**
+
+1. Treat binding as a snapshot operation. Resolve the Project primary path through the Project owner's terminal environment first, then write the canonical value to board `default_workdir`.
+2. Persist enough additive board metadata to use the binding without opening an assignee profile's `projects.db`: canonical `project_id`, Project slug/branch prefix, source profile identity, and canonical `default_workdir`. Do not persist a built-in backend name or provider config snapshot.
+3. Make CLI `project bind-board` and Dashboard board binding write the same reciprocal metadata. A successful bind must update both the Project's `board_slug` and the Board's binding snapshot; do not keep the current best-effort exception swallowing that can report a one-sided bind.
+4. When a board-scoped task omits an explicit Project/workspace, derive its Project identity, deterministic branch, and desired `<default_workdir>/.worktrees/<task-id>` path from this snapshot. The assignee does not need a matching Project row; it needs filesystem reachability.
+5. Keep explicit `--project` resolution fail-closed in the creator profile. The board snapshot is inheritance for a bound board, not a fallback that silently substitutes a different Project for an unresolved explicit request.
+6. Define rebinding semantics explicitly: rebinding the Board refreshes the snapshot for future tasks; existing materialized task rows are not rewritten.
+7. Add one round-trip test proving profile A can bind its Project, a task assigned to profile B inherits the exact canonical root/slug without a Project row in B, and an explicit unresolved Project still fails.
+
+**Acceptance:** Board metadata is the durable bridge from the per-profile Project registry to the global Kanban queue, while worker compatibility is decided by access to the bound path rather than duplicate Project state.
+
+### Task 9: Materialize Project-bound workspaces in the assigned worker environment
+
+**Objective:** Ensure the exact environment used by the assignee validates and creates its Project worktree instead of handing a backend path to controller-local `Path`, Git, or `Popen(cwd=...)`.
+
+**Files:**
+
+- Modify: `hermes_cli/kanban_db.py`
+- Modify: `hermes_cli/kanban_db_workspace.py`
+- Modify: `hermes_cli/kanban_db_dispatch.py`
+- Create or extend the narrow worker bootstrap module selected during implementation; do not append a large new flow to the `kanban_db.py` facade
+- Test: `tests/hermes_cli/test_kanban_project_link.py`
+- Test: the existing Kanban worker workspace/dispatch integration test file nearest `_default_spawn`
+
+**Steps:**
+
+1. Represent a Project-bound task workspace as a desired canonical string plus branch/project provenance. Do not convert a non-local path to controller `Path` or join it with controller `os.path`; use the path-style-aware helpers from Task 3.
+2. Run the Project-bound workspace preflight inside the assignee worker process after `-p <assignee>` has installed that profile's home, secrets, terminal policy, and provider registry, but before the agent turn starts. This guarantees the check and materialization occur in the exact worker environment instead of a separately created dispatcher sandbox.
+3. Acquire that worker's terminal environment through Task 1 and branch only on `env.is_local`:
+   - local: retain the established Git worktree materialization behavior;
+   - non-local: backend-side `cd`/`pwd -P` must resolve the bound root to the exact canonical `default_workdir`, then backend-side Git commands validate the repo and create/reuse the deterministic worktree and branch.
+4. Treat successful canonical root access as the compatibility proof promised by Board binding. Do not compare backend names. A profile whose environment cannot access the root, resolves it to a different canonical path, lacks the expected repository, or cannot materialize the worktree must block the task before agent commands execute.
+5. Return/persist the actual canonical worktree path and resolved branch from the worker preflight. Preserve existing task IDs, claim/run records, retry semantics, and branch naming.
+6. Make the dispatcher launch the local Hermes worker process from a neutral existing controller directory when the task workspace is backend-owned. Pass the desired workspace/branch/Board pins explicitly; never call `os.path.isdir(remote_path)` or `Popen(cwd=remote_path)`.
+7. Preserve workspace authority in the child: the validated task worktree becomes `TERMINAL_CWD` and the session cwd; assignee `terminal.cwd` cannot overwrite it. Backend/image/mount/network/resource settings still come from the assignee profile.
+8. Ensure all assignee profiles intended for a bound Board point to a durable/shared environment. Ephemeral environments that cannot observe the bound root naturally fail the same reachability preflight; no provider-specific prohibition is needed.
+9. Keep Board/task DB and attachments/log paths on the shared Kanban control plane. Only repository/worktree operations move to the terminal environment; task state updates remain controller-side and auditable.
+10. Add one two-profile integration test using two provider registrations backed by the same fake remote filesystem: profile B materializes and runs under profile A's bound Project root. Add the negative pair where B resolves another filesystem or cannot `cd`; assert no controller Git/Popen cwd touches the remote path and the task blocks with the profile/path named.
+
+**Acceptance:** The global dispatcher may be hosted by any profile, but Project-bound workspace creation and use are authoritative in the assignee's terminal environment; every successful worker therefore satisfies the shared-backend assumption.
+
+### Task 10: Reconcile Desktop optimistic state with backend truth
 
 **Objective:** Avoid temporarily retaining the raw path when the backend returns a different canonical path.
 
@@ -256,7 +318,7 @@
 
 **Acceptance:** The renderer remains responsive but never treats its raw input as authoritative after the RPC succeeds.
 
-### Task 9: Document user-visible semantics
+### Task 11: Document user-visible semantics
 
 **Objective:** Make the command behavior and failure boundary explicit.
 
@@ -270,7 +332,9 @@
 2. State that local backends keep lexical local normalization and do not require existence.
 3. State that non-local terminal environments resolve and validate the folder in that environment and store the returned absolute physical path.
 4. State that a non-local resolution failure rejects the command without changing the Project.
-5. Keep wording provider-neutral; do not enumerate built-in backends.
+5. Document the binding contract: a Board bound to a Project uses the Project's canonical backend path, and every assignee profile must be configured to access the same durable/shared filesystem.
+6. Document dispatch failure when an assignee cannot access or canonicalize the bound path; do not imply that matching backend names are required or sufficient.
+7. Keep wording provider-neutral; do not enumerate built-in backends.
 
 ---
 
@@ -286,7 +350,11 @@
 - **Downstream consumption:** a remote-only folder can become the intended session cwd and match back to its Project with controller-local filesystem probes forbidden.
 - **Desktop:** optimistic raw path is replaced by authoritative canonical path; rejected RPC rolls state back.
 - **Cross-platform:** remote POSIX canonical paths are never fed into host-native `abspath`/`normcase` after resolution.
-- **Kanban boundary:** existing local Project-linked worktrees remain unchanged; remote worktree materialization is not claimed by this change and is tracked as a separate transport-level implementation.
+- **Bound Board inheritance:** a profile-A Project binding gives new Board tasks a self-contained canonical root/project slug without requiring the assignee profile to own the same Project row.
+- **Shared backend success:** profile B reaches profile A's canonical root in its own environment, materializes the deterministic worktree there, and runs with that worktree as authoritative cwd.
+- **Shared backend failure:** an assignee whose environment cannot reach the root, resolves a different canonical root, or cannot validate the Git repository is blocked before agent execution; no controller-local Git or cwd call touches the remote path.
+- **Workspace precedence:** task/Board workspace wins over assignee `terminal.cwd`, while assignee backend/image/mount/network/resource policy remains effective.
+- **Snapshot behavior:** rebinding affects future tasks only; existing materialized task workspaces are unchanged.
 
 ### Targeted commands
 
@@ -298,7 +366,9 @@ scripts/run_tests.sh \
   tests/hermes_cli/test_projects_cli.py \
   tests/tui_gateway/test_projects_rpc.py \
   tests/tools/test_desktop_tools_diet.py \
-  tests/agent/test_runtime_cwd.py
+  tests/agent/test_runtime_cwd.py \
+  tests/hermes_cli/test_kanban_project_link.py \
+  tests/plugins/test_kanban_board_project_api.py
 
 cd apps/desktop
 npm test -- --run src/store/projects.test.ts
@@ -329,8 +399,12 @@ Do not run `uv build --wheel`; this change does not require package artifacts.
 7. **Removing deleted paths:** exact stored-path matching precedes backend resolution for remove/set-primary references.
 8. **Partial project creation:** finish all remote probes before opening the database write transaction.
 9. **Existing bad rows:** leave them untouched; automatic migration cannot know which historical backend namespace produced them.
-10. **False end-to-end confidence:** explicitly test session ownership/workspace propagation after persistence; do not stop at a correct database row.
-11. **Kanban overclaim:** do not route controller-side `Path`/Git/Popen work at a remote path as part of this patch. Record remote Project-linked Kanban worktree support as a follow-up requiring backend execution and worker transport changes.
+10. **False end-to-end confidence:** explicitly test session ownership/workspace propagation and a real Project-bound worker preflight after persistence; do not stop at a correct database row.
+11. **Same backend name, different filesystem:** never accept provider/backend-name equality as proof. Require the assignee environment to resolve the bound root to the exact canonical path and validate the expected Git repository.
+12. **Separate environment instances:** materialize during worker bootstrap, not in a dispatcher-created probe sandbox, so validation and execution use the same assignee environment lifecycle.
+13. **Profile cwd override:** task workspace remains authoritative after the child loads profile config; cover Docker auto-mount precedence explicitly.
+14. **Global Board loses Project context:** persist the source profile and Project slug/path snapshot at bind time so cross-profile workers do not need to resolve a per-profile Project row.
+15. **Partial reciprocal bind:** update Project and Board metadata as one reported operation with rollback/compensation; never swallow a Board write and print success.
 
 ## 6. Expected change set
 
@@ -353,6 +427,11 @@ Do not run `uv build --wheel`; this change does not require package artifacts.
 - `tui_gateway/agent_callbacks.py`
 - `agent/runtime_cwd.py` if the end-to-end regression reaches its host-only directory guard
 - `tools/project_tools.py`
+- `hermes_cli/kanban_db.py`
+- `hermes_cli/kanban_db_workspace.py`
+- `hermes_cli/kanban_db_dispatch.py`
+- a narrow Kanban worker-bootstrap sibling selected during implementation
+- `plugins/kanban/dashboard/plugin_api.py`
 
 **Client/docs modifications:**
 
@@ -360,4 +439,4 @@ Do not run `uv build --wheel`; this change does not require package artifacts.
 - `apps/desktop/src/store/projects.test.ts`
 - `website/docs/reference/cli-commands.md`
 
-No schema migration, backend enumeration, provider-specific branch, or generated artifact should be added.
+No backend enumeration, provider-specific branch, or generated artifact should be added. Board metadata may gain additive Project-binding fields; the Kanban task schema should remain unchanged unless implementation proves that existing project/workspace/branch fields cannot carry the required provenance safely.
