@@ -191,6 +191,29 @@ def test_dashboard_markdown_html_is_sanitized_before_render():
     assert "dangerouslySetInnerHTML: { __html: renderMarkdown(props.source || \"\") }" not in js
 
 
+def test_dashboard_backend_path_and_workspace_inheritance_bundle_contract():
+    """The checked-in plugin artifact preserves backend path authority."""
+    bundle = (
+        Path(__file__).resolve().parents[2]
+        / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
+
+    # An untouched board default is inheritance, not an explicit task override.
+    assert "const [workspacePathDirty, setWorkspacePathDirty] = useState(false);" in bundle
+    assert "if (workspacePathDirty) body.workspace_path = wpTrim;" in bundle
+    assert "setWorkspacePathDirty(true)" in bundle
+
+    # Browser input stays textual and tells users where resolution happens.
+    assert "request profile's terminal environment" in bundle
+    board_dialogs = bundle[bundle.index("function NewBoardDialog"):bundle.index("// Toolbar")]
+    assert 'type: "file"' not in board_dialogs
+    assert "source_profile" not in bundle
+
+    # Both Board dialogs retain backend errors and return focus to the path.
+    assert bundle.count("setErr(parseApiErrorMessage(e))") >= 2
+    assert bundle.count("projectDirectoryRef.current.focus()") >= 2
+
+
 # ---------------------------------------------------------------------------
 # GET /tasks/:id returns body + comments + events + links
 # ---------------------------------------------------------------------------

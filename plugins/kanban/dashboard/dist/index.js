@@ -1162,6 +1162,11 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       }).then(function (res) {
+        if (res && res.board) {
+          setBoardList(function (prev) {
+            return prev.filter(function (item) { return item.slug !== res.board.slug; }).concat([res.board]);
+          });
+        }
         loadBoardList();
         const slug = res && res.board && res.board.slug;
         if (slug && payload.switch) switchBoard(slug);
@@ -1178,6 +1183,11 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       }).then(function (res) {
+        if (res && res.board) {
+          setBoardList(function (prev) {
+            return prev.map(function (item) { return item.slug === res.board.slug ? res.board : item; });
+          });
+        }
         loadBoardList();
         return res;
       });
@@ -2176,6 +2186,7 @@
     const [description, setDescription] = useState("");
     const [icon, setIcon] = useState("");
     const [projectDirectory, setProjectDirectory] = useState("");
+    const projectDirectoryRef = useRef(null);
     const [switchTo, setSwitchTo] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [err, setErr] = useState(null);
@@ -2203,8 +2214,9 @@
         default_workdir: projectDirectory.trim() || undefined,
         switch: switchTo,
       }).catch(function (e) {
-        setErr(String(e && e.message ? e.message : e));
+        setErr(parseApiErrorMessage(e));
         setSubmitting(false);
+        if (projectDirectoryRef.current) projectDirectoryRef.current.focus();
       });
     }
 
@@ -2262,6 +2274,7 @@
               h("span", { className: "text-muted-foreground" },
                 tx(t, "projectDirectoryHint", "(recommended)"))),
             h(Input, {
+              ref: projectDirectoryRef,
               value: projectDirectory,
               onChange: function (e) { setProjectDirectory(e.target.value); },
               placeholder: tx(t, "projectDirectoryPlaceholder",
@@ -2275,7 +2288,8 @@
             }),
             h("div", { className: "text-xs text-muted-foreground" },
               tx(t, "projectDirectoryExplanation",
-                "Sets the default location for task files so project output is preserved.")),
+                "The absolute path is resolved in this request profile's terminal environment when saved.")),
+            err ? h("div", { className: "text-xs text-destructive", role: "alert" }, err) : null,
           ),
           h("div", { className: "flex flex-col gap-1" },
             h(Label, { className: "text-xs" }, tx(t, "icon", "Icon"), " ",
@@ -2296,7 +2310,6 @@
             tx(t, "switchAfterCreate", "Switch to this board after creating it"),
           ),
         ),
-        err ? h("div", { className: "text-xs text-destructive mt-2" }, err) : null,
         h("div", { className: "hermes-kanban-dialog-actions" },
           h(Button, {
             type: "button",
@@ -2324,6 +2337,7 @@
     const [name, setName] = useState(b.name || "");
     const [description, setDescription] = useState(b.description || "");
     const [projectDirectory, setProjectDirectory] = useState(b.default_workdir || "");
+    const projectDirectoryRef = useRef(null);
     const [submitting, setSubmitting] = useState(false);
     const [err, setErr] = useState(null);
 
@@ -2340,6 +2354,7 @@
       }).catch(function (e) {
         setErr(parseApiErrorMessage(e));
         setSubmitting(false);
+        if (projectDirectoryRef.current) projectDirectoryRef.current.focus();
       });
     }
 
@@ -2376,6 +2391,7 @@
             h(Label, { className: "text-xs" },
               tx(t, "projectDirectory", "Project directory")),
             h(Input, {
+              ref: projectDirectoryRef,
               value: projectDirectory,
               onChange: function (e) { setProjectDirectory(e.target.value); },
               placeholder: tx(t, "projectDirectoryPlaceholder",
@@ -2389,10 +2405,10 @@
             }),
             h("div", { className: "text-xs text-muted-foreground" },
               tx(t, "projectDirectoryOverrideHint",
-                "New tasks inherit this as their workspace default; each task can still override it in the create dialog.")),
+                "The absolute path is resolved in this request profile's terminal environment when saved; new tasks inherit it unless explicitly overridden.")),
+            err ? h("div", { className: "text-xs text-destructive", role: "alert" }, err) : null,
           ),
         ),
-        err ? h("div", { className: "text-xs text-destructive mt-2" }, err) : null,
         h("div", { className: "hermes-kanban-dialog-actions" },
           h(Button, {
             type: "button",
@@ -3175,6 +3191,7 @@
     const defaultWorkspacePath = props.defaultWorkspacePath || "";
     const [workspaceKind, setWorkspaceKind] = useState(defaultWorkspaceKind);
     const [workspacePath, setWorkspacePath] = useState(defaultWorkspacePath);
+    const [workspacePathDirty, setWorkspacePathDirty] = useState(false);
     // Goal-mode: when on, the dispatched worker runs the Ralph-style /goal
     // loop — a judge re-checks the card after each turn and the worker keeps
     // going in the same session until done, or the turn budget runs out
@@ -3207,7 +3224,7 @@
         body.workspace_kind = workspaceKind;
       }
       const wpTrim = workspacePath.trim();
-      if (wpTrim) body.workspace_path = wpTrim;
+      if (workspacePathDirty) body.workspace_path = wpTrim;
       // Goal-mode toggle. Only send the keys when enabled so the request
       // shape stays small and old dispatchers ignore it cleanly.
       if (goalMode) {
@@ -3217,7 +3234,7 @@
       }
       props.onSubmit(body);
       setTitle(""); setAssignee(""); setPriority(0); setParent(""); setSkills("");
-      setWorkspaceKind(defaultWorkspaceKind); setWorkspacePath(defaultWorkspacePath);
+      setWorkspaceKind(defaultWorkspaceKind); setWorkspacePath(defaultWorkspacePath); setWorkspacePathDirty(false);
       setGoalMode(false); setGoalMaxTurns("");
     };
 
@@ -3324,7 +3341,7 @@
               ),
               showPathInput ? h(Input, {
                 value: workspacePath,
-                onChange: function (e) { setWorkspacePath(e.target.value); },
+                onChange: function (e) { setWorkspacePath(e.target.value); setWorkspacePathDirty(true); },
                 placeholder: pathPlaceholder,
                 className: "h-8 text-sm flex-1",
               }) : null,

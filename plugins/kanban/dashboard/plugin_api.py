@@ -1281,18 +1281,18 @@ def _board_display_kwargs(p: BaseModel) -> dict[str, Any]:
     return {"name": p.name, "description": p.description, "icon": p.icon, "color": p.color}
 
 
-def _resolve_project(ref: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Resolve a project id/slug to ``(id, name, primary_path)``; ``(None,)*3``
+def _resolve_project(ref: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Any]:
+    """Resolve to ``(id, name, primary_path, slug, Project)``; all-None
     for a falsy ref, 400 when a non-empty ref doesn't resolve."""
     if not ref or not ref.strip():
-        return None, None, None
+        return None, None, None, None, None
     with _errors_to_500("projects unavailable"):
         from hermes_cli import projects_db as pdb
         with pdb.connect_closing() as pconn:
             proj = pdb.get_project(pconn, ref.strip())
     if proj is None:
         raise HTTPException(status_code=400, detail=f"project {ref!r} does not exist")
-    return proj.id, proj.name, (proj.primary_path or None)
+    return proj.id, proj.name, (proj.primary_path or None), proj.slug, proj
 
 
 def _projects_by_id() -> dict[str, Any]:
@@ -1319,9 +1319,15 @@ def _board_counts(slug: str) -> dict[str, int]:
 
 def _default_workspace_kind(board: dict[str, Any]) -> str:
     """Recommend a non-destructive task workspace from board metadata."""
+    persisted = str(board.get("default_workspace_kind") or "").strip()
+    if persisted in {"scratch", "dir", "worktree"}:
+        return persisted
     workdir = str(board.get("default_workdir") or "").strip()
     if not workdir:
         return "scratch"
+    # Unknown/remote legacy rows must not probe a backend path on this host.
+    if board.get("filesystem_local") is not True:
+        return "dir"
     try:
         return "worktree" if kbw._git_toplevel(Path(workdir)) else "dir"
     except (OSError, ValueError):
@@ -1330,7 +1336,12 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
 
 def _annotate_board_meta(meta: dict) -> dict:
     meta["default_workspace_kind"] = _default_workspace_kind(meta)
-    _, meta["project_name"], _ = _resolve_project(meta.get("project_id"))
+    meta["project_name"] = meta.get("project_slug")
+    if meta.get("project_id"):
+        try:
+            _, meta["project_name"], _, _, _ = _resolve_project(meta.get("project_id"))
+        except HTTPException:
+            pass
     return meta
 
 
@@ -1366,27 +1377,48 @@ def list_boards(include_archived: bool = Query(False)):
     return {"boards": boards, "current": current}
 
 
-def _validate_workdir(raw: str) -> str:
-    """Board default_workdir must be an absolute, existing directory (400 otherwise)."""
-    requested = Path(raw).expanduser()
-    if not requested.is_absolute():
-        raise HTTPException(status_code=400, detail="Project directory must be an absolute path.")
-    if not requested.is_dir():
-        raise HTTPException(status_code=400, detail="Project directory must be an existing directory.")
-    return str(requested.resolve())
+def _validate_workdir(raw: str) -> dict[str, Any]:
+    """Resolve a strict existing Board directory in the request profile."""
+    from hermes_cli.kanban_project_paths import resolve_project_directory
+    from hermes_cli.profiles import get_active_profile_name
+
+    profile = get_active_profile_name() or "default"
+    try:
+        return resolve_project_directory(
+            raw,
+            require_absolute_existing_directory=True,
+            operation_scope=f"kanban-dashboard:{profile}",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 @router.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a board. Idempotent — ``slug`` collision returns the existing one."""
-    default_workdir = _validate_workdir(payload.default_workdir) if payload.default_workdir else None
-    # A chosen project's primary repo becomes the default workdir unless one was passed explicitly.
-    project_id, _pname, primary_path = _resolve_project(payload.project_id)
-    if primary_path and not default_workdir:
-        default_workdir = primary_path
-    with _value_error_400():
-        meta = kanban_db.create_board(
-            payload.slug, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+    workspace = _validate_workdir(payload.default_workdir) if payload.default_workdir else None
+    project_id, _pname, primary_path, project_slug, project = _resolve_project(payload.project_id)
+    if primary_path and workspace is None:
+        workspace = _validate_workdir(primary_path)
+    binding = workspace or {}
+    source_profile = None
+    if project_id:
+        from hermes_cli.profiles import get_active_profile_name
+        source_profile = get_active_profile_name() or "default"
+        from hermes_cli import projects_db as pdb
+        from hermes_cli.kanban_project_binding import reciprocal_project_bind
+
+        try:
+            normed = kanban_db._require_slug(payload.slug)
+            with pdb.connect_closing() as pconn, reciprocal_project_bind(pconn, project, normed):
+                meta = kanban_db.create_board(
+                    normed, project_id=project_id, project_slug=project_slug,
+                    source_profile=source_profile, **binding, **_board_display_kwargs(payload))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+    else:
+        with _value_error_400():
+            meta = kanban_db.create_board(payload.slug, **binding, **_board_display_kwargs(payload))
     if payload.switch:
         with _value_error_400():
             kanban_db.set_current_board(meta["slug"])
@@ -1397,22 +1429,63 @@ def create_board_endpoint(payload: CreateBoardBody):
 def rename_board(slug: str, payload: RenameBoardBody):
     """Update display metadata / default workdir / project scope (slug is immutable)."""
     normed = _existing_board_slug(slug)
-    # write_board_metadata treats a falsy value as "clear", so pass "" through.
-    default_workdir: Optional[str] = None
+    workspace: dict[str, Any] = {}
     if payload.default_workdir is not None:
         raw = payload.default_workdir.strip()
-        default_workdir = _validate_workdir(raw) if raw else ""
-    # A resolved project mirrors its repo into default_workdir unless the caller set it explicitly.
+        workspace = _validate_workdir(raw) if raw else {
+            "default_workdir": "",
+            "default_workspace_kind": "",
+        }
+
     project_id: Optional[str] = None
+    project_slug: Optional[str] = None
+    project = None
+    if payload.project_id is not None and payload.project_id.strip():
+        project_id, _pname, primary_path, project_slug, project = _resolve_project(payload.project_id)
+        if primary_path and payload.default_workdir is None:
+            workspace = _validate_workdir(primary_path)
+    elif payload.project_id == "":
+        project_id = ""
+
+    write_kwargs = dict(_board_display_kwargs(payload))
+    write_kwargs.update(workspace)
     if payload.project_id is not None:
-        if payload.project_id.strip():
-            project_id, _pname, primary_path = _resolve_project(payload.project_id)
-            if primary_path and default_workdir is None:
-                default_workdir = primary_path
+        write_kwargs["project_id"] = project_id
+        write_kwargs["project_slug"] = project_slug if project_id else ""
+        if project_id:
+            from hermes_cli.profiles import get_active_profile_name
+            write_kwargs["source_profile"] = get_active_profile_name() or "default"
         else:
-            project_id = ""  # clear the scope
-    meta = kanban_db.write_board_metadata(
-        normed, default_workdir=default_workdir, project_id=project_id, **_board_display_kwargs(payload))
+            write_kwargs["source_profile"] = ""
+
+    if project is not None:
+        from hermes_cli import projects_db as pdb
+        from hermes_cli.kanban_project_binding import reciprocal_project_bind
+        try:
+            with pdb.connect_closing() as pconn, reciprocal_project_bind(pconn, project, normed):
+                meta = kanban_db.write_board_metadata(normed, **write_kwargs)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+    elif payload.project_id == "":
+        old_meta = kanban_db.read_board_metadata(normed)
+        path = kanban_db.board_metadata_path(normed)
+        before = path.read_bytes() if path.exists() else None
+        meta = kanban_db.write_board_metadata(normed, **write_kwargs)
+        old_project_id = old_meta.get("project_id")
+        old_source = old_meta.get("source_profile")
+        if old_project_id:
+            from hermes_cli.profiles import get_active_profile_name
+            if old_source == (get_active_profile_name() or "default"):
+                from hermes_cli import projects_db as pdb
+                with pdb.connect_closing() as pconn:
+                    old_project = pdb.get_project(pconn, old_project_id)
+                    if old_project is not None and old_project.board_slug == normed:
+                        if not pdb.update_project(pconn, old_project.id, board_slug=""):
+                            if before is not None:
+                                path.write_bytes(before)
+                            raise HTTPException(status_code=400, detail="Project disappeared during board unbind")
+    else:
+        meta = kanban_db.write_board_metadata(normed, **write_kwargs)
     return {"board": _annotate_board_meta(meta)}
 
 

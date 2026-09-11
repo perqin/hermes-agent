@@ -17,6 +17,20 @@ def _project_operation_scope() -> str:
     return f"projects:{get_hermes_home()}"
 
 
+def _project_binding_snapshot(proj) -> dict:
+    """Resolve the Project root and workspace facts in its owning profile."""
+    if not proj.primary_path:
+        raise ValueError(f"project {proj.slug!r} has no primary folder")
+    from hermes_cli.kanban_project_paths import resolve_project_directory
+    from hermes_cli.profiles import get_active_profile_name
+
+    profile = get_active_profile_name() or "default"
+    return resolve_project_directory(
+        proj.primary_path,
+        operation_scope=f"kanban-bind:{profile}:{proj.id}",
+    )
+
+
 def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Attach the ``project`` subcommand tree. Returns the top parser."""
     parser = parent_subparsers.add_parser(
@@ -228,19 +242,35 @@ def _flag_command(op: str, verb: str):
 
 @_with_project
 def _cmd_bind_board(args, conn, proj) -> str:
-    pdb.update_project(conn, proj.id, board_slug=args.board)
-    if not args.board.strip():
-        return f"Unbound board from {proj.slug}"
-    if proj.primary_path:  # best-effort: point the bound board's default_workdir at the primary repo
-        try:
-            from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_project_binding import (
+        clear_owned_project_binding,
+        reciprocal_project_bind,
+    )
+    from hermes_cli.profiles import get_active_profile_name
 
-            slug = kb._normalize_board_slug(args.board)
-            if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
-                kb.write_board_metadata(slug, default_workdir=proj.primary_path)
-        except Exception:
-            pass
-    return f"Bound {proj.slug} -> board {args.board}"
+    requested = str(args.board or "").strip()
+    if not requested:
+        if proj.board_slug:
+            clear_owned_project_binding(conn, proj, proj.board_slug)
+        else:
+            pdb.update_project(conn, proj.id, board_slug="")
+        return f"Unbound board from {proj.slug}"
+
+    slug = kb._normalize_board_slug(requested)
+    if not slug or (slug != kb.DEFAULT_BOARD and not kb.board_exists(slug)):
+        raise ValueError(f"board {requested!r} does not exist")
+
+    snapshot = _project_binding_snapshot(proj)
+    with reciprocal_project_bind(conn, proj, slug):
+        kb.write_board_metadata(
+            slug,
+            project_id=proj.id,
+            project_slug=proj.slug,
+            source_profile=get_active_profile_name() or "default",
+            **snapshot,
+        )
+    return f"Bound {proj.slug} -> board {slug}"
 
 
 _HANDLERS = {

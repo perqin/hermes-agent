@@ -539,6 +539,12 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
         "default_workdir": None,
         # Project scope: new tasks inherit it (deterministic worktree + branch).
         "project_id": None,
+        "project_slug": None,
+        "source_profile": None,
+        "default_workspace_kind": None,
+        # Capability snapshot, not a provider/backend identity.  ``None`` keeps
+        # old board rows conservative until they are rebound or revalidated.
+        "filesystem_local": None,
         "created_at": None,
         "archived": False,
     }
@@ -561,6 +567,9 @@ def write_board_metadata(
     board: Optional[str], *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, archived: Optional[bool] = None,
     default_workdir: Optional[str] = None, project_id: Optional[str] = None,
+    project_slug: Optional[str] = None, source_profile: Optional[str] = None,
+    default_workspace_kind: Optional[str] = None, filesystem_local: Optional[bool] = None,
+    clear_project_binding: bool = False,
 ) -> dict:
     """Create/update ``board.json``; unmentioned fields are preserved, ``created_at``
     set on first write. ``project_id``/``default_workdir``: ``None`` = unchanged,
@@ -577,9 +586,23 @@ def write_board_metadata(
             meta[key] = str(value)
     if archived is not None:
         meta["archived"] = bool(archived)
-    for key, value in (("default_workdir", default_workdir), ("project_id", project_id)):
+    if clear_project_binding:
+        for key in (
+            "default_workdir", "project_id", "project_slug", "source_profile",
+            "default_workspace_kind", "filesystem_local",
+        ):
+            meta[key] = None
+    for key, value in (
+        ("default_workdir", default_workdir),
+        ("project_id", project_id),
+        ("project_slug", project_slug),
+        ("source_profile", source_profile),
+        ("default_workspace_kind", default_workspace_kind),
+    ):
         if value is not None:
             meta[key] = str(value) if value else None
+    if filesystem_local is not None:
+        meta["filesystem_local"] = bool(filesystem_local)
     if not meta.get("created_at"):
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
@@ -594,13 +617,17 @@ def write_board_metadata(
 def create_board(
     slug: str, *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, default_workdir: Optional[str] = None,
-    project_id: Optional[str] = None,
+    project_id: Optional[str] = None, project_slug: Optional[str] = None,
+    source_profile: Optional[str] = None, default_workspace_kind: Optional[str] = None,
+    filesystem_local: Optional[bool] = None,
 ) -> dict:
     """Create board dir + DB + metadata (``mkdir -p`` semantics: existing board returns its metadata)."""
     normed = _require_slug(slug)
     meta = write_board_metadata(
         normed, name=name, description=description, icon=icon, color=color,
-        default_workdir=default_workdir, project_id=project_id,
+        default_workdir=default_workdir, project_id=project_id, project_slug=project_slug,
+        source_profile=source_profile, default_workspace_kind=default_workspace_kind,
+        filesystem_local=filesystem_local,
     )
     # Touch the DB so list_boards() sees it immediately.
     init_db(board=normed)
@@ -1136,6 +1163,30 @@ def _resolve_project_link(
     return project_obj.id, project_obj, project_repo, workspace_kind
 
 
+def _project_snapshot_from_board(board: Optional[str]) -> tuple[Any, str, str] | None:
+    """Return the self-contained Project binding carried by ``board``.
+
+    The Project registry is profile-local, so an assignee must not reopen the
+    owner's projects.db merely to derive a task branch/worktree path.
+    """
+    from types import SimpleNamespace
+
+    meta = _board_meta_for(board)
+    project_id = str(meta.get("project_id") or "").strip()
+    project_slug = str(meta.get("project_slug") or "").strip()
+    project_root = str(meta.get("default_workdir") or "").strip()
+    if not (project_id and project_slug and project_root):
+        return None
+    kind = str(meta.get("default_workspace_kind") or "worktree").strip()
+    project = SimpleNamespace(
+        id=project_id,
+        slug=project_slug,
+        name=project_slug,
+        primary_path=project_root,
+    )
+    return project, project_root, kind
+
+
 def _project_from_source_task(
     conn: sqlite3.Connection, _pdb: Any, project_id: str, source_task_id: str,
 ) -> tuple[Any, Optional[str]]:
@@ -1259,15 +1310,18 @@ def create_task(
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
         raise ValueError(f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}")
-    # A project-scoped board anchors every new task to its project's repo
+    # A project-scoped board anchors every new task to its snapshotted repo
     # (deterministic worktree + branch) without each surface repeating it.
     # An explicit ``scratch`` (or ``project_id=""``) is a request for no project:
     # it must not be upgraded to a worktree in the board's repo (#106342).
+    explicit_project = project_id is not None and bool(str(project_id).strip())
+    inherited_snapshot = None
     if project_id is None and workspace_kind != "scratch":
-        try:
-            project_id = (_board_meta_for(board).get("project_id") or "").strip() or None
-        except Exception:
-            pass
+        inherited_snapshot = _project_snapshot_from_board(board)
+        if inherited_snapshot is not None:
+            project_id = inherited_snapshot[0].id
+            if workspace_kind is None:
+                workspace_kind = inherited_snapshot[2]
     if workspace_kind is None:
         workspace_kind = "scratch"
     if workspace_kind not in VALID_WORKSPACE_KINDS:
@@ -1280,9 +1334,17 @@ def create_task(
     if branch_name and workspace_kind != "worktree":
         raise ValueError("branch_name is only valid for worktree workspaces")
 
-    project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
-        conn, project_id, project_source_task_id, workspace_kind, workspace_path
-    )
+    if inherited_snapshot is not None:
+        project_obj, project_repo, _snapshot_kind = inherited_snapshot
+        project_id = project_obj.id
+        if workspace_kind != "worktree":
+            project_repo = None
+    else:
+        project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
+            conn, project_id, project_source_task_id, workspace_kind, workspace_path
+        )
+        if explicit_project and project_obj is None:
+            raise ValueError(f"explicit project {project_id!r} does not exist")
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
@@ -1318,7 +1380,8 @@ def create_task(
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
                     if project_repo and not workspace_path:
-                        workspace_path = os.path.join(project_repo, ".worktrees", task_id)
+                        separator = "\\" if "\\" in project_repo and "/" not in project_repo else "/"
+                        workspace_path = project_repo.rstrip("/\\") + separator + separator.join((".worktrees", task_id))
                     if not branch_name:
                         branch_name = _project_branch_name(project_obj, task_id, title)
 

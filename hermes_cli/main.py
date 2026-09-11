@@ -1720,6 +1720,18 @@ def cmd_chat(args):
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
 
+    # The profile flag/HERMES_HOME have been applied before this handler.  Only
+    # now is it safe to acquire the assignee's terminal environment and touch a
+    # Project-bound backend path.
+    if os.environ.get("HERMES_KANBAN_BACKEND_ROOT") or os.environ.get("HERMES_KANBAN_PROJECT_ROOT"):
+        from hermes_cli.kanban_worker_workspace import prepare_project_workspace_from_env
+
+        try:
+            prepare_project_workspace_from_env()
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     _pin_kanban_board_env()
     _confirm_startup_expensive_model_override(args)
 
