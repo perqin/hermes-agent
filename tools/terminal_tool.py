@@ -1047,6 +1047,44 @@ def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
         return new_env
 
 
+class TerminalEnvironmentAcquisitionError(RuntimeError):
+    """A configured terminal environment could not be acquired."""
+
+
+def acquire_terminal_environment(
+    *, task_id: Optional[str] = None, operation_scope: Optional[str] = None,
+    timeout: int = 30,
+) -> Any:
+    """Return the configured/cached terminal environment without running a tool command.
+
+    A real ``task_id`` reuses that session's lifecycle.  Sessionless callers may
+    supply ``operation_scope`` to keep profile-qualified remote environments in
+    distinct cache slots.  Acquisition failures are raised rather than folded
+    into the model-facing terminal result envelope.
+    """
+    planning_task_id = task_id if task_id is not None else operation_scope
+    try:
+        plan = _plan_execution(
+            ":", task_id=planning_task_id, timeout=timeout,
+            background=False, _host_local=False,
+        )
+        if task_id is None and operation_scope:
+            plan.effective_task_id = operation_scope
+        return _acquire_env(plan, task_id)
+    except _Rejected as exc:
+        try:
+            message = json.loads(exc.result_json).get("error") or "terminal environment was rejected"
+        except Exception:
+            message = "terminal environment was rejected"
+        raise TerminalEnvironmentAcquisitionError(_redact_terminal_error_text(str(message))) from None
+    except TerminalEnvironmentAcquisitionError:
+        raise
+    except Exception as exc:
+        message = _redact_terminal_error_text(
+            f"terminal environment acquisition failed: {type(exc).__name__}: {exc}")
+        raise TerminalEnvironmentAcquisitionError(message) from None
+
+
 def _yield_kwargs(command: str, **ctx) -> dict:
     """``env.execute`` kwargs enabling yield-to-background (local backend only)."""
     handler = yield_to_background_handler(command=command, **ctx)

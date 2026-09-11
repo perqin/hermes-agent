@@ -66,6 +66,23 @@ def provider_flag(name: str, attr: str, default=False):
         return default
 
 
+def provider_filesystem_scope(name: str) -> str:
+    """Return ``local``, ``non_local``, or ``unknown`` without creating an environment."""
+    provider = _registry.get_provider(name)
+    if provider is None:
+        return "unknown"
+    try:
+        value = provider.filesystem_local
+    except Exception:
+        logger.debug("Terminal environment provider '%s' filesystem_local raised", name, exc_info=True)
+        return "unknown"
+    if value is True:
+        return "local"
+    if value is False:
+        return "non_local"
+    return "unknown"
+
+
 def plugin_strip_env_keys() -> frozenset:
     """Union of every registered provider's ``strip_env_keys`` — across ALL scopes, not
     just the active backend: a token in the process environment is strippable regardless of

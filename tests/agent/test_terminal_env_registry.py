@@ -202,3 +202,21 @@ def test_registry_generation_bumps():
     reg.register_provider(_Provider())
     g1 = reg.registry_generation()
     assert g1 != g0
+
+
+def test_plugin_environment_filesystem_capability_is_provider_driven():
+    class HostFilesystemProvider(_Provider):
+        name = "hostfs_plugin"
+        filesystem_local = True
+
+    provider = HostFilesystemProvider()
+    reg.register_provider(provider)
+
+    from tools.terminal_tool_backends import _create_environment, terminal_filesystem_scope
+
+    env = _create_environment(
+        provider.name, image="", cwd=".", timeout=10, task_id="provider-contract")
+
+    assert env.is_local is True
+    assert terminal_filesystem_scope(provider.name) == "local"
+    assert terminal_filesystem_scope("missing_plugin") == "unknown"

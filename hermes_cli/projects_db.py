@@ -111,6 +111,14 @@ def _normalize_path(path: str) -> str:
     return p.rstrip("/\\") or p
 
 
+def _storage_path(path: str, *, canonical_paths: bool) -> str:
+    if not canonical_paths:
+        return _normalize_path(path)
+    from hermes_cli.project_paths import canonical_storage_path
+
+    return canonical_storage_path(path)
+
+
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the per-profile projects DB.
 
@@ -211,15 +219,25 @@ def _primary_path_key(path: str) -> str:
     return os.path.normcase(_normalize_path(path))
 
 
-def find_by_primary_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
+def find_by_primary_path(
+    conn: sqlite3.Connection, path: str, *, include_archived: bool = False,
+    canonical_paths: bool = False,
+) -> Optional[Project]:
     """The first (oldest) project whose primary path matches ``path`` (separator/case normalized so
     equivalent Windows spellings don't slip past the dedup check), else None."""
-    key = _primary_path_key(path)
+    if canonical_paths:
+        from hermes_cli.project_paths import canonical_path_key
+
+        key = canonical_path_key(_storage_path(path, canonical_paths=True))
+        key_for = canonical_path_key
+    else:
+        key = _primary_path_key(path)
+        key_for = _primary_path_key
     for proj in list_projects(conn, include_archived=include_archived) if key else ():
         primary = proj.primary_path or next(
             (f.path for f in proj.folders if f.is_primary), proj.folders[0].path if proj.folders else None
         )
-        if primary and _primary_path_key(primary) == key:
+        if primary and key_for(primary) == key:
             return proj
     return None
 
@@ -228,6 +246,7 @@ def create_project(
     conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
     primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
     color: Optional[str] = None, board_slug: Optional[str] = None, allow_duplicate_path: bool = False,
+    canonical_paths: bool = False,
 ) -> str:
     """Create a project and return its id. ``folders`` are normalized to absolute paths; ``primary_path``
     is added to the folder set (if absent) and marked primary, else the first folder becomes primary."""
@@ -237,13 +256,16 @@ def create_project(
     slug_candidate = normalize_slug(slug) if slug else _slugify(name)
     pid = "p_" + secrets.token_hex(4)
     now = _now()
-    folder_paths = list(dict.fromkeys(p for p in map(_normalize_path, folders or []) if p))
-    primary = _normalize_path(primary_path) if primary_path else None
+    folder_paths = list(dict.fromkeys(
+        _storage_path(p, canonical_paths=canonical_paths) for p in (folders or [])))
+    primary = _storage_path(primary_path, canonical_paths=canonical_paths) if primary_path else None
     if primary and primary not in folder_paths:
         folder_paths.insert(0, primary)
     if primary is None and folder_paths:
         primary = folder_paths[0]
-    existing = find_by_primary_path(conn, primary) if primary and not allow_duplicate_path else None
+    existing = find_by_primary_path(
+        conn, primary, canonical_paths=canonical_paths,
+    ) if primary and not allow_duplicate_path else None
     if existing is not None:
         raise ValueError(
             f"folder already belongs to project '{existing.slug}' ({existing.id}); "
@@ -309,9 +331,12 @@ def _execute_rowcount(conn: sqlite3.Connection, sql: str, params) -> int:
     return cur.rowcount
 
 
-def add_folder(conn: sqlite3.Connection, project_id: str, path: str, *, label: Optional[str] = None, is_primary: bool = False) -> str:
+def add_folder(
+    conn: sqlite3.Connection, project_id: str, path: str, *, label: Optional[str] = None,
+    is_primary: bool = False, canonical_paths: bool = False,
+) -> str:
     """Add a folder to a project. Returns the normalized path."""
-    norm = _normalize_path(path)
+    norm = _storage_path(path, canonical_paths=canonical_paths)
     if not norm:
         raise ValueError("folder path must not be empty")
     if get_project(conn, project_id) is None:
@@ -331,9 +356,11 @@ def add_folder(conn: sqlite3.Connection, project_id: str, path: str, *, label: O
     return norm
 
 
-def remove_folder(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
+def remove_folder(
+    conn: sqlite3.Connection, project_id: str, path: str, *, canonical_paths: bool = False,
+) -> bool:
     """Remove a folder from a project. Repoints primary if it was primary."""
-    norm = _normalize_path(path)
+    norm = _storage_path(path, canonical_paths=canonical_paths)
     with write_txn(conn):
         was_primary = conn.execute(
             "SELECT is_primary FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)
@@ -357,8 +384,10 @@ def _set_primary_locked(conn: sqlite3.Connection, project_id: str, path: str) ->
     conn.execute("UPDATE projects SET primary_path = ? WHERE id = ?", (path, project_id))
 
 
-def set_primary(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
-    norm = _normalize_path(path)
+def set_primary(
+    conn: sqlite3.Connection, project_id: str, path: str, *, canonical_paths: bool = False,
+) -> bool:
+    norm = _storage_path(path, canonical_paths=canonical_paths)
     with write_txn(conn):
         if conn.execute("SELECT 1 FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)).fetchone() is None:
             return False
@@ -471,16 +500,16 @@ def project_for_path(conn: sqlite3.Connection, path: str, *, include_archived: b
     folder wins so nested projects resolve to the innermost one."""
     if not str(path or "").strip():
         return None
-    target = _normalize_path(path)
+    from hermes_cli.project_paths import path_owns
+
+    raw_target = str(path)
+    target = raw_target if raw_target.startswith(("/", "\\\\")) or re.match(
+        r"^[A-Za-z]:[\\/]", raw_target) else _normalize_path(raw_target)
     sql = "SELECT pf.project_id AS pid, pf.path AS folder FROM project_folders pf JOIN projects p ON p.id = pf.project_id"
     if not include_archived:
         sql += " WHERE p.archived = 0"
 
-    def owns(folder: str) -> bool:
-        stem = folder.rstrip("/\\")
-        return target == folder or target.startswith(stem + os.sep) or target.startswith(stem + "/")
-
-    owners = [row for row in conn.execute(sql).fetchall() if owns(row["folder"])]
+    owners = [row for row in conn.execute(sql).fetchall() if path_owns(row["folder"], target)]
     return get_project(conn, max(owners, key=lambda r: len(r["folder"]))["pid"]) if owners else None
 
 

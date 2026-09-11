@@ -52,25 +52,30 @@ def _kanban_lane_id(repo_root: str) -> str:
 
 
 def _segments(path: str) -> list[str]:
-    return [s for s in re.split(r"[/\\]", (path or "").rstrip("/\\")) if s]
+    from hermes_cli.project_paths import path_segments
+
+    return path_segments(path)
 
 
 def _is_windows_path(path: str) -> bool:
-    # Drive-letter, UNC (`\\srv`, `//srv`) or backslash-rooted; a single leading `/` stays POSIX.
-    value = (path or "").strip()
-    return bool(re.match(r"^[A-Za-z]:[/\\]", value)) or value.startswith(("\\", "//"))
+    from hermes_cli.project_paths import is_windows_path
+
+    return is_windows_path(path)
 
 
 def _comparison_segments(path: str) -> list[str]:
     """Segments for identity comparison: Windows paths casefold (even on POSIX); display
     paths and emitted IDs keep their spelling."""
-    segs = _segments(path)
-    return [s.casefold() for s in segs] if _is_windows_path(path) else segs
+    from hermes_cli.project_paths import path_comparison_segments
+
+    return path_comparison_segments(path)
 
 
 def _path_key(path: str) -> str:
     """Canonical comparison key (separator/trailing-slash agnostic)."""
-    return "/".join(_comparison_segments(path))
+    from hermes_cli.project_paths import path_comparison_key
+
+    return path_comparison_key(path)
 
 
 def _lane_key(path_or_lane: str) -> str:

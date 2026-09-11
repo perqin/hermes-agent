@@ -6,7 +6,6 @@ tool call, never a side effect of ``cd``. GUI-only: the `project` toolset stays 
 ``set_project_workspace_callback`` so the live session's cwd and sidebar follow."""
 
 import json
-import os
 from typing import Callable, Optional
 
 from tools.registry import registry
@@ -33,10 +32,7 @@ def _primary_path(proj) -> Optional[str]:
 def _apply_workspace(task_id: Optional[str], path: Optional[str], name: str) -> None:
     cb = _workspace_callback
     if cb and task_id and path:
-        try:
-            cb(task_id, path, name)
-        except Exception:
-            pass
+        cb(task_id, path, name)
 
 
 def _resolve(conn, token: str):
@@ -58,7 +54,10 @@ def _resolve(conn, token: str):
 
 def _activated(proj, task_id: Optional[str]) -> str:
     primary = _primary_path(proj)
-    _apply_workspace(task_id, primary, proj.name)
+    try:
+        _apply_workspace(task_id, primary, proj.name)
+    except Exception:
+        return json.dumps({"success": False, "error": "project workspace update failed"})
     return json.dumps({
         "success": True, "id": proj.id, "slug": proj.slug, "name": proj.name,
         "primary_path": primary})
@@ -83,12 +82,14 @@ def project_create(name: str, path: Optional[str] = None, task_id: Optional[str]
     if not name:
         return json.dumps({"success": False, "error": "name is required"})
     from hermes_cli import projects_db as pdb
+    from hermes_cli.project_paths import resolve_project_folder
     folder = (path or "").strip()
-    if folder:
-        folder = os.path.abspath(os.path.expanduser(folder))
     try:
+        if folder:
+            folder = resolve_project_folder(folder, task_id=task_id)
         with pdb.connect_closing() as conn:
-            existing = pdb.find_by_primary_path(conn, folder) if folder else None
+            existing = pdb.find_by_primary_path(
+                conn, folder, canonical_paths=True) if folder else None
             if existing is not None:
                 # Idempotent create: duplicates would render N identical sidebar subtrees.
                 # Idempotent create: the folder already belongs to a project. Re-activating it beats minting
@@ -96,7 +97,9 @@ def project_create(name: str, path: Optional[str] = None, task_id: Optional[str]
                 pdb.set_active(conn, existing.id)
                 proj = existing
             else:
-                pid = pdb.create_project(conn, name=name, folders=[folder] if folder else [], primary_path=folder or None)
+                pid = pdb.create_project(
+                    conn, name=name, folders=[folder] if folder else [],
+                    primary_path=folder or None, canonical_paths=True)
                 pdb.set_active(conn, pid)
                 proj = pdb.get_project(conn, pid)
     except ValueError as exc:

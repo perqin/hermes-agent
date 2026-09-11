@@ -58,7 +58,21 @@ def scope_terminal_cwd() -> str:
     return terminal_env("TERMINAL_CWD", "")
 
 
+def _filesystem_is_local() -> bool:
+    """Provider-neutral terminal filesystem locality without creating an environment."""
+    try:
+        from tools.terminal_scope import terminal_env
+        from tools.terminal_tool_backends import terminal_filesystem_scope
+
+        return terminal_filesystem_scope(terminal_env("TERMINAL_ENV", "local")) == "local"
+    except ImportError:
+        return True
+
+
 def _existing_dir(raw: str, label: str) -> Path | None:
+    if not _filesystem_is_local():
+        # Backend-owned canonical session paths must never be statted on the controller.
+        return Path(raw)
     p = Path(raw).expanduser()
     if p.is_dir():
         return p

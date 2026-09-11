@@ -7,6 +7,14 @@ import functools
 import sys
 
 from hermes_cli import projects_db as pdb
+from hermes_cli.project_paths import (
+    resolve_project_folder, resolve_project_folder_reference, resolve_project_folders,
+)
+from hermes_constants import get_hermes_home
+
+
+def _project_operation_scope() -> str:
+    return f"projects:{get_hermes_home()}"
 
 
 def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -132,9 +140,12 @@ def _print_project(proj) -> None:
 
 @_db_command
 def _cmd_create(args, conn) -> int:
+    folders, primary = resolve_project_folders(
+        args.folders, args.primary, operation_scope=_project_operation_scope())
     pid = pdb.create_project(
-        conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
+        conn, name=args.name, slug=args.slug, folders=folders, primary_path=primary,
         description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
+        canonical_paths=True,
     )
     if args.use:
         pdb.set_active(conn, pid)
@@ -167,15 +178,20 @@ def _cmd_show(args, conn, proj) -> int:
 
 @_with_project
 def _cmd_add_folder(args, conn, proj) -> str:
-    path = pdb.add_folder(conn, proj.id, args.path, label=args.label, is_primary=args.primary)
+    canonical = resolve_project_folder(args.path, operation_scope=_project_operation_scope())
+    path = pdb.add_folder(
+        conn, proj.id, canonical, label=args.label, is_primary=args.primary,
+        canonical_paths=True)
     return f"Added {path} to {proj.slug}"
 
 
 @_with_project
 def _cmd_remove_folder(args, conn, proj):
-    if not pdb.remove_folder(conn, proj.id, args.path):
+    canonical = resolve_project_folder_reference(
+        proj, args.path, operation_scope=_project_operation_scope())
+    if not pdb.remove_folder(conn, proj.id, canonical, canonical_paths=True):
         return _err(f"folder not in project: {args.path}")
-    return f"Removed {args.path} from {proj.slug}"
+    return f"Removed {canonical} from {proj.slug}"
 
 
 @_with_project
@@ -186,9 +202,11 @@ def _cmd_rename(args, conn, proj) -> str:
 
 @_with_project
 def _cmd_set_primary(args, conn, proj):
-    if not pdb.set_primary(conn, proj.id, args.path):
+    canonical = resolve_project_folder_reference(
+        proj, args.path, operation_scope=_project_operation_scope())
+    if not pdb.set_primary(conn, proj.id, canonical, canonical_paths=True):
         return _err(f"'{args.path}' is not a folder of {proj.slug}; add it first with `hermes project add-folder`.")
-    return f"Set primary of {proj.slug} -> {args.path}"
+    return f"Set primary of {proj.slug} -> {canonical}"
 
 
 @_db_command
