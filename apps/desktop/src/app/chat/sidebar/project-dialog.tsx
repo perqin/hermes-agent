@@ -77,7 +77,7 @@ export function ProjectDialog() {
     if (open) {
       setName(state?.name ?? '')
       setFolders([])
-      setFolderPath('')
+      setFolderPath(state?.path ?? '')
       setFilesystemScope(mode === 'rename' ? 'unknown' : null)
       setPathError('')
       setIdea('')
@@ -89,7 +89,7 @@ export function ProjectDialog() {
         window.setTimeout(() => nameRef.current?.select(), 0)
       }
     }
-  }, [open, mode, state?.name])
+  }, [open, mode, state?.name, state?.path])
 
   useEffect(() => {
     const context = state?.context
@@ -194,13 +194,16 @@ export function ProjectDialog() {
     }
 
     if (mode === 'open-folder') {
-      await runSubmit(() => openFolderAsProject(folderPath, state?.context))
+      if (!name.trim()) {
+        return
+      }
+
+      await runSubmit(() => openFolderAsProject(folderPath, state?.context, name.trim()))
 
       return
     }
 
     setFolders(prev => (prev.includes(folderPath) ? prev : [...prev, folderPath]))
-    setFolderPath('')
     setPathError('')
   }
 
@@ -292,7 +295,12 @@ export function ProjectDialog() {
             value={folderPath}
           />
           <Button
-            disabled={submitting || filesystemScope === null || !folderPath.trim()}
+            disabled={
+              submitting ||
+              filesystemScope === null ||
+              !folderPath.trim() ||
+              (mode === 'open-folder' && !name.trim())
+            }
             onClick={() => void submitFolderPath()}
             type="button"
           >
@@ -323,7 +331,7 @@ export function ProjectDialog() {
           {mode === 'create' && <DialogDescription>{p.createDesc}</DialogDescription>}
         </DialogHeader>
 
-        {mode !== 'add-folder' && mode !== 'open-folder' && (
+        {mode !== 'add-folder' && (mode !== 'open-folder' || pathMode === 'text') && (
           <Input
             autoFocus
             disabled={submitting}
@@ -450,6 +458,12 @@ export function ProjectDialog() {
         )}
 
         {(mode === 'add-folder' || mode === 'open-folder') && pathEntry}
+
+        {pathMode !== 'text' && pathError && (
+          <span className="text-[0.75rem] text-destructive" role="alert">
+            {pathError}
+          </span>
+        )}
 
         {mode !== 'add-folder' && mode !== 'open-folder' && (
           <DialogFooter>

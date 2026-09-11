@@ -22,6 +22,8 @@ import {
   enterProject,
   exitProjectScope,
   fetchProjectSessions,
+  invalidateProjectFilesystemCapabilities,
+  moveSessionToProject,
   openFolderAsProject,
   openProjectCreate,
   pickProjectFolder,
@@ -53,6 +55,7 @@ vi.mock('@/store/notifications', () => ({
 }))
 
 vi.mock('@/lib/desktop-fs', () => ({
+  captureDesktopFsWriteRoute: vi.fn(() => ({ connectionId: 'host-a', profile: 'default', remote: true })),
   desktopDefaultCwd: vi.fn(),
   isDesktopFsRemoteMode: vi.fn(),
   projectPathEntryMode: vi.fn((scope: string | null, remote: boolean) =>
@@ -102,12 +105,14 @@ const notify = vi.mocked(notifications.notify)
 
 function deferred<T>() {
   let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
 
-  const promise = new Promise<T>(done => {
+  const promise = new Promise<T>((done, fail) => {
     resolve = done
+    reject = fail
   })
 
-  return { promise, resolve }
+  return { promise, reject, resolve }
 }
 
 describe('project scope', () => {
@@ -449,6 +454,57 @@ describe('pickProjectFolder', () => {
     expect(requestA).toHaveBeenCalledOnce()
     expect(requestA).toHaveBeenCalledWith('projects.capabilities', { profile: 'coder' })
     expect(context).toMatchObject({ gateway: gatewayA, generation: 7, profile: 'coder' })
+  })
+
+  it('refetches filesystem locality after terminal configuration changes in the same profile', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ filesystem_scope: 'local' })
+      .mockResolvedValueOnce({ filesystem_scope: 'non_local' })
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    const context = captureProjectPathContext()!
+
+    await expect(projectFilesystemScope(context)).resolves.toBe('local')
+    invalidateProjectFilesystemCapabilities()
+    await expect(projectFilesystemScope(context)).resolves.toBe('non_local')
+
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not publish an in-flight local capability after terminal configuration changes', async () => {
+    const staleLocal = deferred<{ filesystem_scope: 'local' }>()
+    const request = vi
+      .fn()
+      .mockReturnValueOnce(staleLocal.promise)
+      .mockResolvedValueOnce({ filesystem_scope: 'non_local' })
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    const context = captureProjectPathContext()!
+
+    const pending = projectFilesystemScope(context)
+    invalidateProjectFilesystemCapabilities()
+    staleLocal.resolve({ filesystem_scope: 'local' })
+
+    await expect(pending).resolves.toBe('non_local')
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries unknown and failed filesystem locality lookups', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce({ filesystem_scope: 'unknown' })
+      .mockResolvedValueOnce({ filesystem_scope: 'local' })
+    const gateway = { connectionState: 'open', request }
+    activeGateway.mockReturnValue(gateway as never)
+    const context = captureProjectPathContext()!
+
+    await expect(projectFilesystemScope(context)).resolves.toBe('unknown')
+    await expect(projectFilesystemScope(context)).resolves.toBe('unknown')
+    await expect(projectFilesystemScope(context)).resolves.toBe('local')
+
+    expect(request).toHaveBeenCalledTimes(3)
   })
 })
 
@@ -1021,6 +1077,32 @@ describe('tombstone pruning', () => {
   })
 })
 
+describe('session workspace move response', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    $activeGatewayProfile.set('default')
+    $projectTree.set([{ id: 'p_remote', label: 'Remote', path: '/requested/root', repos: [], sessionCount: 1 }])
+    $sessions.set([{ id: 'session-a', cwd: '/old/root' }] as never)
+  })
+
+  it('uses the canonical workspace returned by session.workspace.move', async () => {
+    const request = vi.fn().mockResolvedValue({ cwd: '/canonical/root', branch: 'main', git_repo_root: '/canonical/root' })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+
+    await moveSessionToProject('session-a', 'p_remote')
+
+    expect($sessions.get()[0]?.cwd).toBe('/canonical/root')
+  })
+
+  it('fails closed when session.workspace.move omits its canonical cwd', async () => {
+    const request = vi.fn().mockResolvedValue({})
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+
+    await expect(moveSessionToProject('session-a', 'p_remote')).rejects.toThrow('canonical workspace')
+    expect($sessions.get()[0]?.cwd).toBe('/old/root')
+  })
+})
+
 describe('authoritative project path mutations', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -1079,6 +1161,37 @@ describe('authoritative project path mutations', () => {
     expect($projectTree.get()[0]?.path).toBe('/workspace/repo')
   })
 
+  it('does not roll a stale add-folder failure back over the newly active profile', async () => {
+    const mutation = deferred<{ project: null }>()
+    const gatewayA = {
+      connectionState: 'open',
+      request: vi.fn((method: string) =>
+        method === 'projects.add_folder' ? mutation.promise : Promise.resolve({ active_id: null, projects: [] })
+      )
+    }
+    const gatewayB = { connectionState: 'open', request: vi.fn() }
+    let current = gatewayA
+    activeGateway.mockImplementation(() => current as never)
+    const projectA = { folders: [], id: 'p_a', name: 'A', primary_path: null }
+    const projectB = { folders: [], id: 'p_b', name: 'B', primary_path: null }
+    const treeA = { id: 'p_a', label: 'A', path: null, repos: [], sessionCount: 0 }
+    const treeB = { id: 'p_b', label: 'B', path: null, repos: [], sessionCount: 0 }
+    $projects.set([projectA] as never)
+    $projectTree.set([treeA])
+
+    const pending = addProjectFolder('p_a', '../repo')
+    await vi.waitFor(() => expect(gatewayA.request).toHaveBeenCalledWith('projects.add_folder', expect.anything()))
+    current = gatewayB
+    $activeGatewayProfile.set('profile-b')
+    $projects.set([projectB] as never)
+    $projectTree.set([treeB])
+    mutation.resolve({ project: null })
+
+    await expect(pending).rejects.toThrow('Active Hermes profile changed')
+    expect($projects.get()).toEqual([projectB])
+    expect($projectTree.get()).toEqual([treeB])
+  })
+
   it('opens a text prompt without browsing when no path is supplied for a non-local profile', async () => {
     const request = vi.fn().mockResolvedValue({ filesystem_scope: 'non_local' })
     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
@@ -1119,16 +1232,38 @@ describe('authoritative project path mutations', () => {
 
     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
 
-    await openFolderAsProject('../repo')
+    await openFolderAsProject('../repo', undefined, 'Remote workspace')
 
     expect(request).toHaveBeenCalledWith('projects.for_cwd', { cwd: '../repo', profile: 'default' })
     expect(request).toHaveBeenCalledWith(
       'projects.create',
-      expect.objectContaining({ folders: ['../repo'], name: 'repo', primary_path: '../repo', profile: 'default' })
+      expect.objectContaining({
+        folders: ['../repo'],
+        name: 'Remote workspace',
+        primary_path: '../repo',
+        profile: 'default'
+      })
     )
     expect($projectTree.get()).toContainEqual(expect.objectContaining({ id: created.id, path: '/workspace/repo' }))
     expect($startWorkSessionRequest.get()).toMatchObject({ path: '/workspace/repo' })
     expect(selectDesktopPaths).not.toHaveBeenCalled()
+  })
+
+  it('prompts for an explicit project name instead of inferring one for a non-local folder', async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === 'projects.capabilities') {return { filesystem_scope: 'non_local' }}
+
+      if (method === 'projects.for_cwd') {return { branch: '', cwd: '/workspace/repo', project: null }}
+
+      return {}
+    })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+
+    await openFolderAsProject('../repo')
+
+    expect(request).not.toHaveBeenCalledWith('projects.create', expect.anything())
+    expect($projectDialog.get()).toMatchObject({ mode: 'open-folder', path: '../repo' })
+    expect($startWorkSessionRequest.get()).toBeNull()
   })
 
   it('uses projects.for_cwd canonical cwd for an existing project', async () => {
@@ -1183,6 +1318,58 @@ describe('authoritative project path mutations', () => {
 
     expect($startWorkSessionRequest.get()).toMatchObject({ path: '/local/repo' })
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'warning' }))
+  })
+
+  it('does not use the local raw fallback when the profile switches before for-cwd rejects', async () => {
+    const forCwd = deferred<never>()
+    const gatewayA = {
+      connectionState: 'open',
+      request: vi.fn((method: string) =>
+        method === 'projects.capabilities' ? Promise.resolve({ filesystem_scope: 'local' }) : forCwd.promise
+      )
+    }
+    const gatewayB = { connectionState: 'open', request: vi.fn() }
+    let current = gatewayA
+    activeGateway.mockImplementation(() => current as never)
+
+    const pending = openFolderAsProject('/profile-a/repo')
+    await vi.waitFor(() => expect(gatewayA.request).toHaveBeenCalledWith('projects.for_cwd', expect.anything()))
+    current = gatewayB
+    $activeGatewayProfile.set('profile-b')
+    forCwd.reject(new Error('profile A lookup failed'))
+
+    await expect(pending).rejects.toThrow('Active Hermes profile changed')
+    expect($startWorkSessionRequest.get()).toBeNull()
+  })
+
+  it('does not use the local raw fallback when the profile switches before create rejects', async () => {
+    const create = deferred<never>()
+    const gatewayA = {
+      connectionState: 'open',
+      request: vi.fn((method: string) => {
+        if (method === 'projects.capabilities') {return Promise.resolve({ filesystem_scope: 'local' })}
+
+        if (method === 'projects.for_cwd') {
+          return Promise.resolve({ branch: '', cwd: '/canonical/profile-a/repo', project: null })
+        }
+
+        if (method === 'projects.create') {return create.promise}
+
+        return Promise.resolve({})
+      })
+    }
+    const gatewayB = { connectionState: 'open', request: vi.fn() }
+    let current = gatewayA
+    activeGateway.mockImplementation(() => current as never)
+
+    const pending = openFolderAsProject('/profile-a/repo')
+    await vi.waitFor(() => expect(gatewayA.request).toHaveBeenCalledWith('projects.create', expect.anything()))
+    current = gatewayB
+    $activeGatewayProfile.set('profile-b')
+    create.reject(new Error('profile A create failed'))
+
+    await expect(pending).rejects.toThrow('Active Hermes profile changed')
+    expect($startWorkSessionRequest.get()).toBeNull()
   })
 
   it('keeps auto-project appearance adoption on projects.create and applies canonical response', async () => {
@@ -1318,5 +1505,32 @@ describe('authoritative project path mutations', () => {
     )
 
     expect(writeDesktopFileText).not.toHaveBeenCalled()
+  })
+
+  it('binds a local-filesystem IDEA.md write to the host route captured with the project dialog', async () => {
+    const created = {
+      folders: [{ added_at: 1, is_primary: true, label: null, path: '/host-a/repo' }],
+      id: 'p_local',
+      name: 'Local',
+      primary_path: '/host-a/repo'
+    }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'projects.capabilities') {return { filesystem_scope: 'local' }}
+
+      if (method === 'projects.create') {return { project: created }}
+
+      return { active_id: created.id, projects: [created], scoped_session_ids: [] }
+    })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+    const context = captureProjectPathContext()!
+
+    await createProject({ context, folders: ['/host-a/repo'], idea: 'Pinned idea', name: 'Local' })
+    await vi.waitFor(() => expect(writeDesktopFileText).toHaveBeenCalledOnce())
+
+    expect(writeDesktopFileText).toHaveBeenCalledWith('/host-a/repo/IDEA.md', 'Pinned idea\n', {
+      connectionId: 'host-a',
+      profile: 'default',
+      remote: true
+    })
   })
 })

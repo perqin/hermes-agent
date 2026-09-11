@@ -10,6 +10,22 @@ import type { ProjectFilesystemScope } from '@/types/hermes'
 
 export type ProjectPathEntryMode = 'gateway-picker' | 'native-picker' | 'text'
 
+export interface DesktopFsWriteRoute {
+  connectionId?: string
+  profile?: string
+  remote: boolean
+}
+
+export function captureDesktopFsWriteRoute(): DesktopFsWriteRoute {
+  const connection = $connection.get()
+
+  return {
+    connectionId: connection?.connectionId || undefined,
+    profile: connection?.profile || undefined,
+    remote: connection?.mode === 'remote'
+  }
+}
+
 export function projectPathEntryMode(
   filesystemScope: null | ProjectFilesystemScope,
   remoteConnection = isDesktopFsRemoteMode()
@@ -105,10 +121,15 @@ export async function readDesktopFileText(path: string): Promise<HermesReadFileT
 // IPC; remote writes hit the dashboard's POST /api/fs/write-text (same path
 // hardening, parent-must-exist, size cap) so the editor behaves identically in
 // both modes. Stale-on-disk detection is the caller's job (re-read before save).
-export async function writeDesktopFileText(path: string, content: string): Promise<{ path: string }> {
+export async function writeDesktopFileText(
+  path: string,
+  content: string,
+  capturedRoute?: DesktopFsWriteRoute
+): Promise<{ path: string }> {
   const desktop = bridge()
+  const remote = capturedRoute?.remote ?? isDesktopFsRemoteMode()
 
-  if (!isDesktopFsRemoteMode()) {
+  if (!remote) {
     if (!desktop.writeTextFile) {
       throw new Error('Saving is not available')
     }
@@ -116,7 +137,19 @@ export async function writeDesktopFileText(path: string, content: string): Promi
     return desktop.writeTextFile(path, content)
   }
 
-  const result = await remoteFsApi<{ ok?: boolean; path?: string }>('/api/fs/write-text', { content, path })
+  if (capturedRoute && !capturedRoute.connectionId) {
+    throw new Error('The captured remote filesystem route is no longer addressable')
+  }
+
+  const result = capturedRoute
+    ? await hermesApi<{ ok?: boolean; path?: string }>({
+        body: { content, path },
+        connectionId: capturedRoute.connectionId,
+        method: 'POST',
+        path: '/api/fs/write-text',
+        ...(capturedRoute.profile ? { profile: capturedRoute.profile } : {})
+      })
+    : await remoteFsApi<{ ok?: boolean; path?: string }>('/api/fs/write-text', { content, path })
 
   return { path: result.path || path }
 }

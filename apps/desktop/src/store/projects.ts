@@ -9,7 +9,14 @@ import {
 import type { HermesGitBaseBranch, HermesGitBranch } from '@/global'
 import { getHermesConfig, hermesApi, type HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
-import { desktopDefaultCwd, isDesktopFsRemoteMode, selectDesktopPaths, writeDesktopFileText } from '@/lib/desktop-fs'
+import {
+  captureDesktopFsWriteRoute,
+  desktopDefaultCwd,
+  type DesktopFsWriteRoute,
+  isDesktopFsRemoteMode,
+  selectDesktopPaths,
+  writeDesktopFileText
+} from '@/lib/desktop-fs'
 import { desktopGit } from '@/lib/desktop-git'
 import { isMissingRestEndpoint, isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { isUnderPath } from '@/lib/path-compare'
@@ -316,6 +323,7 @@ interface ActiveProjectsContext {
 }
 
 export interface ProjectPathContext extends ActiveProjectsContext {
+  fsWriteRoute?: DesktopFsWriteRoute
   generation: number
   remoteConnection: boolean
 }
@@ -352,6 +360,7 @@ export function captureProjectPathContext(): ProjectPathContext | null {
 
   return {
     gateway,
+    fsWriteRoute: captureDesktopFsWriteRoute(),
     generation: gatewayActivationEpoch(),
     profile,
     remoteConnection: isDesktopFsRemoteMode()
@@ -380,18 +389,27 @@ async function resolveProjectPathContext(context?: ProjectPathContext): Promise<
 
   return {
     ...active,
+    fsWriteRoute: captureDesktopFsWriteRoute(),
     generation: gatewayActivationEpoch(),
     remoteConnection: isDesktopFsRemoteMode()
   }
 }
 
-const projectCapabilityCache = new WeakMap<HermesGateway, Map<string, Promise<ProjectFilesystemScope>>>()
+let projectCapabilityCache = new WeakMap<HermesGateway, Map<string, Promise<ProjectFilesystemScope>>>()
+let projectCapabilityRevision = 0
+
+/** Terminal configuration can change without changing gateway/profile/epoch. */
+export function invalidateProjectFilesystemCapabilities(): void {
+  projectCapabilityRevision += 1
+  projectCapabilityCache = new WeakMap()
+}
 
 export async function projectFilesystemScope(context: ProjectPathContext): Promise<ProjectFilesystemScope> {
   if (!projectPathContextIsCurrent(context)) {
     throw new Error('Active Hermes profile changed while choosing a project folder')
   }
 
+  const revision = projectCapabilityRevision
   let gatewayCache = projectCapabilityCache.get(context.gateway)
 
   if (!gatewayCache) {
@@ -399,7 +417,7 @@ export async function projectFilesystemScope(context: ProjectPathContext): Promi
     projectCapabilityCache.set(context.gateway, gatewayCache)
   }
 
-  const key = `${context.profile}:${context.generation}`
+  const key = `${context.profile}:${context.generation}:${revision}`
   let pending = gatewayCache.get(key)
 
   if (!pending) {
@@ -415,9 +433,19 @@ export async function projectFilesystemScope(context: ProjectPathContext): Promi
       )
       .catch(() => 'unknown' as const)
     gatewayCache.set(key, pending)
+
+    void pending.then(scope => {
+      if (scope === 'unknown' && gatewayCache?.get(key) === pending) {
+        gatewayCache.delete(key)
+      }
+    })
   }
 
   const scope = await pending
+
+  if (revision !== projectCapabilityRevision) {
+    return projectFilesystemScope(context)
+  }
 
   if (!projectPathContextIsCurrent(context)) {
     throw new Error('Active Hermes profile changed while choosing a project folder')
@@ -665,7 +693,12 @@ export async function moveSessionToProject(
     ...(profile ? { profile } : {})
   })
 
-  const moved = res.cwd || cwd
+  const moved = res.cwd?.trim()
+
+  if (!moved) {
+    throw new Error('Session move did not return a canonical workspace')
+  }
+
   setSessions(prev =>
     prev.map(s =>
       sessionMatchesStoredId(s, sessionId)
@@ -908,7 +941,15 @@ async function writeProjectIdea(
       return
     }
 
-    await writeDesktopFileText(`${dir.replace(/[/\\]+$/, '')}/IDEA.md`, body.endsWith('\n') ? body : `${body}\n`)
+    if (!context.fsWriteRoute || !projectPathContextIsCurrent(context)) {
+      return
+    }
+
+    await writeDesktopFileText(
+      `${dir.replace(/[/\\]+$/, '')}/IDEA.md`,
+      body.endsWith('\n') ? body : `${body}\n`,
+      context.fsWriteRoute
+    )
   } catch {
     // Best-effort: the project is created regardless of whether IDEA.md lands.
   }
@@ -938,11 +979,17 @@ const restoreProjects = ({ projects, tree, active }: ProjectsSnapshot): void => 
 }
 
 // Await an already-applied optimistic write; restore the snapshot if it throws.
-async function persistOrRollback(snap: ProjectsSnapshot, write: () => Promise<void>): Promise<void> {
+async function persistOrRollback(
+  snap: ProjectsSnapshot,
+  write: () => Promise<void>,
+  shouldRollback: () => boolean = () => true
+): Promise<void> {
   try {
     await write()
   } catch (err) {
-    restoreProjects(snap)
+    if (shouldRollback()) {
+      restoreProjects(snap)
+    }
     throw err
   }
 }
@@ -1158,6 +1205,7 @@ export async function addProjectFolder(
   path: string,
   opts: { context?: ProjectPathContext; label?: string; isPrimary?: boolean } = {}
 ): Promise<void> {
+  const context = opts.context ? await resolveProjectPathContext(opts.context) : await resolveProjectPathContext()
   const snap = snapshotProjects()
   const trimmed = path.trim()
 
@@ -1189,21 +1237,23 @@ export async function addProjectFolder(
 
   let authoritative: ProjectInfo | null = null
 
-  await persistOrRollback(snap, async () => {
-    const context = opts.context ? await resolveProjectPathContext(opts.context) : await resolveProjectPathContext()
+  await persistOrRollback(
+    snap,
+    async () => {
+      const response = await gatewayRequestOn<{ project: ProjectInfo | null }>(
+        context.gateway,
+        'projects.add_folder',
+        projectParams({ id, path, label: opts.label, is_primary: opts.isPrimary ?? false }, context.profile)
+      )
 
-    const response = await gatewayRequestOn<{ project: ProjectInfo | null }>(
-      context.gateway,
-      'projects.add_folder',
-      projectParams({ id, path, label: opts.label, is_primary: opts.isPrimary ?? false }, context.profile)
-    )
+      if (!projectPathContextIsCurrent(context)) {
+        throw new Error('Active Hermes profile changed while adding a project folder')
+      }
 
-    if (!projectPathContextIsCurrent(context)) {
-      throw new Error('Active Hermes profile changed while adding a project folder')
-    }
-
-    authoritative = response.project
-  })
+      authoritative = response.project
+    },
+    () => projectPathContextIsCurrent(context)
+  )
 
   if (authoritative) {
     applyAuthoritativeProject(authoritative)
@@ -1269,6 +1319,7 @@ export interface ProjectDialogState {
   mode: 'add-folder' | 'create' | 'open-folder' | 'rename'
   projectId?: string
   name?: string
+  path?: string
 }
 
 export const $projectDialog = atom<null | ProjectDialogState>(null)
@@ -1543,7 +1594,11 @@ export async function pickProjectFolder(captured?: ProjectPathContext): Promise<
 // ⌘O / palette "Open folder…": resolve path ownership on the captured
 // profile first. Backend-returned cwd/project data is authoritative; raw-path
 // workspace fallback is retained only for a filesystem explicitly proven local.
-export async function openFolderAsProject(dir?: string, captured?: ProjectPathContext): Promise<void> {
+export async function openFolderAsProject(
+  dir?: string,
+  captured?: ProjectPathContext,
+  projectName?: string
+): Promise<void> {
   const context = await resolveProjectPathContext(captured)
   const filesystemScope = await projectFilesystemScope(context)
   let raw = dir
@@ -1563,6 +1618,10 @@ export async function openFolderAsProject(dir?: string, captured?: ProjectPathCo
   }
 
   const localFallback = (error: unknown) => {
+    if (!projectPathContextIsCurrent(context)) {
+      throw new Error('Active Hermes profile changed while opening a project folder')
+    }
+
     if (filesystemScope !== 'local') {
       throw error
     }
@@ -1604,15 +1663,25 @@ export async function openFolderAsProject(dir?: string, captured?: ProjectPathCo
     setSidebarAgentsGrouped(true)
     enterProject(resolved.project.id)
   } else {
+    const explicitName = projectName?.trim()
+
+    if (filesystemScope !== 'local' && !explicitName) {
+      $projectDialog.set({ context, mode: 'open-folder', path: raw })
+
+      return
+    }
+
     try {
       const created = await createProject({
         context,
         folders: [raw],
         name:
+          explicitName ||
           canonicalCwd
             .replace(/[/\\]+$/, '')
             .split(/[/\\]/)
-            .pop() || canonicalCwd,
+            .pop() ||
+          canonicalCwd,
         primaryPath: raw,
         use: true
       })

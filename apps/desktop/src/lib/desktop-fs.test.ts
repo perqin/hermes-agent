@@ -4,6 +4,7 @@ import { setApiRequestConnection } from '@/api/client'
 import { $connection } from '@/store/session'
 
 import {
+  captureDesktopFsWriteRoute,
   desktopDefaultCwd,
   desktopFileDiff,
   desktopFsCacheKey,
@@ -14,7 +15,8 @@ import {
   readDesktopFileDataUrlLocalFirst,
   readDesktopFileText,
   selectDesktopPaths,
-  setDesktopFsRemotePicker
+  setDesktopFsRemotePicker,
+  writeDesktopFileText
 } from './desktop-fs'
 
 const readDir = vi.fn(async () => ({ entries: [{ name: 'local', path: '/local', isDirectory: true }] }))
@@ -42,6 +44,10 @@ const api = vi.fn(async ({ path }: { path: string }) => {
 
   if (path === '/api/fs/default-cwd') {
     return { cwd: '/backend/project', branch: 'main' }
+  }
+
+  if (path === '/api/fs/write-text') {
+    return { ok: true, path: '/remote/file.txt' }
   }
 
   if (path.startsWith('/api/git/file-diff?')) {
@@ -194,6 +200,24 @@ describe('desktop filesystem facade', () => {
     for (const [request] of api.mock.calls) {
       expect(request).toMatchObject({ connectionId: 'mr-small', profile: 'default' })
     }
+  })
+
+  it('keeps a file write pinned to its captured remote host after the live connection switches', async () => {
+    $connection.set({ connectionId: 'host-a', mode: 'remote', profile: 'profile-a' } as never)
+    setApiRequestConnection('host-a')
+    const route = captureDesktopFsWriteRoute()
+
+    $connection.set({ connectionId: 'host-b', mode: 'remote', profile: 'profile-b' } as never)
+    setApiRequestConnection('host-b')
+    await writeDesktopFileText('/host-a/project/IDEA.md', 'idea\n', route)
+
+    expect(api).toHaveBeenCalledWith({
+      body: { content: 'idea\n', path: '/host-a/project/IDEA.md' },
+      connectionId: 'host-a',
+      method: 'POST',
+      path: '/api/fs/write-text',
+      profile: 'profile-a'
+    })
   })
 
   it('separates filesystem cache keys for registered connections sharing a profile', () => {
