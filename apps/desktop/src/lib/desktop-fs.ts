@@ -6,6 +6,20 @@ import type {
   HermesSelectPathsOptions
 } from '@/global'
 import { $connection } from '@/store/session'
+import type { ProjectFilesystemScope } from '@/types/hermes'
+
+export type ProjectPathEntryMode = 'gateway-picker' | 'native-picker' | 'text'
+
+export function projectPathEntryMode(
+  filesystemScope: null | ProjectFilesystemScope,
+  remoteConnection = isDesktopFsRemoteMode()
+): ProjectPathEntryMode {
+  if (filesystemScope !== 'local') {
+    return 'text'
+  }
+
+  return remoteConnection ? 'gateway-picker' : 'native-picker'
+}
 
 export interface DesktopFsRemotePicker {
   selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>

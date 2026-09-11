@@ -1106,6 +1106,12 @@ export interface ProjectsPayload {
   active_id: null | string
 }
 
+export type ProjectFilesystemScope = 'local' | 'non_local' | 'unknown'
+
+export interface ProjectsCapabilities {
+  filesystem_scope: ProjectFilesystemScope
+}
+
 export interface ProfileSoul {
   content: string
   exists: boolean

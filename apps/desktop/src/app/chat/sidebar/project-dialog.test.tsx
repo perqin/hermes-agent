@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type * as Nanostores from 'nanostores'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProjectDialog } from './project-dialog'
 
@@ -18,6 +18,13 @@ vi.mock('@/i18n', () => ({
           createFailed: 'Failed to create project',
           createTitle: 'New project',
           foldersLabel: 'Folders',
+          pathAdd: 'Add path',
+          pathError: 'The folder could not be resolved',
+          pathHelp: 'Enter a path in the profile terminal filesystem.',
+          pathLabel: 'Project folder path',
+          pathLoading: 'Checking where project folders are stored…',
+          pathPlaceholder: '~/path/to/project',
+          openFolderTitle: 'Open folder as project',
           ideaGenerate: 'Generate',
           ideaGenerating: 'Generating…',
           ideaLabel: 'Idea',
@@ -44,9 +51,12 @@ const { $newProjectDropPlacement, $projectDialog } = vi.hoisted(() => {
   return {
     // Where a "New project" DRAG armed its drop (null = plain click).
     $newProjectDropPlacement: atom<{ anchor: string; before?: null | string; dir: string } | null>(null),
-    $projectDialog: atom<{ mode: 'create' | 'rename' | 'add-folder'; name?: string; projectId?: string } | null>({
-      mode: 'create'
-    })
+    $projectDialog: atom<{
+      context?: Record<string, unknown>
+      mode: 'create' | 'rename' | 'add-folder' | 'open-folder'
+      name?: string
+      projectId?: string
+    } | null>({ mode: 'create', context: { generation: 1, profile: 'default', remoteConnection: false } })
   }
 })
 
@@ -58,7 +68,9 @@ vi.mock('@/store/projects', () => ({
   closeProjectDialog: vi.fn(),
   createProject: vi.fn(),
   generateProjectIdea: vi.fn(),
+  openFolderAsProject: vi.fn(),
   pickProjectFolder: vi.fn(async () => '/Users/test/my-folder'),
+  projectFilesystemScope: vi.fn(async () => 'local'),
   renameProject: vi.fn()
 }))
 
@@ -78,7 +90,7 @@ const tipTrigger = (el: HTMLElement) => el.closest('[data-slot="tooltip-trigger"
 // from one test leaking into the next.
 async function fillCreateForm() {
   fireEvent.change(screen.getByPlaceholderText('Project name'), { target: { value: 'Skunkworks' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Add folder' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Add folder' }))
   await screen.findByText('/Users/test/my-folder')
 
   const create = screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement
@@ -88,6 +100,17 @@ async function fillCreateForm() {
 }
 
 describe('ProjectDialog', () => {
+  beforeEach(async () => {
+    const store = vi.mocked(await import('@/store/projects'))
+
+    store.projectFilesystemScope.mockResolvedValue('local')
+  })
+
+  afterEach(() => {
+    $projectDialog.set({ mode: 'create', context: { generation: 1, profile: 'default', remoteConnection: false } })
+    vi.clearAllMocks()
+  })
+
   it('wraps the "shuffle idea" button in a Tip', () => {
     render(<ProjectDialog />)
 
@@ -98,7 +121,7 @@ describe('ProjectDialog', () => {
   it('wraps the "remove folder" button in a Tip once a folder is added', async () => {
     render(<ProjectDialog />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add folder' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Add folder' }))
 
     const button = await screen.findByRole('button', { name: 'Remove folder' })
     expect(tipTrigger(button)).toBeTruthy()
@@ -155,5 +178,86 @@ describe('ProjectDialog', () => {
     await waitFor(() => expect(createProject).toHaveBeenCalledOnce())
 
     expect(createProject.mock.calls[0]?.[0]).toMatchObject({ dropPlacement: undefined })
+  })
+
+  it('uses raw text entry for a non-local profile and never invokes a picker', async () => {
+    const store = vi.mocked(await import('@/store/projects'))
+
+    store.projectFilesystemScope.mockResolvedValueOnce('non_local')
+    render(<ProjectDialog />)
+
+    const path = await screen.findByRole('textbox', { name: 'Project folder path' })
+    fireEvent.change(screen.getByPlaceholderText('Project name'), { target: { value: 'Remote repo' } })
+    fireEvent.change(path, { target: { value: '../repo' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add path' }))
+    await screen.findByText('../repo')
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+    await waitFor(() => expect(store.createProject).toHaveBeenCalledOnce())
+    expect(store.createProject.mock.calls[0]?.[0]).toMatchObject({ folders: ['../repo'], name: 'Remote repo' })
+    expect(store.pickProjectFolder).not.toHaveBeenCalled()
+  })
+
+  it('keeps non-local add-folder input and backend error visible for correction', async () => {
+    const store = vi.mocked(await import('@/store/projects'))
+
+    store.projectFilesystemScope.mockResolvedValueOnce('non_local')
+    store.addProjectFolder.mockRejectedValueOnce(new Error('cannot resolve ~/missing'))
+    $projectDialog.set({
+      context: { generation: 1, profile: 'remote', remoteConnection: false },
+      mode: 'add-folder',
+      projectId: 'p_remote'
+    })
+    render(<ProjectDialog />)
+
+    const path = await screen.findByRole('textbox', { name: 'Project folder path' })
+    fireEvent.change(path, { target: { value: '~/missing' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add path' }))
+
+    expect(await screen.findByText('cannot resolve ~/missing')).toBeTruthy()
+    expect((path as HTMLInputElement).value).toBe('~/missing')
+    expect(store.addProjectFolder).toHaveBeenCalledOnce()
+    expect(store.closeProjectDialog).not.toHaveBeenCalled()
+    expect(store.pickProjectFolder).not.toHaveBeenCalled()
+  })
+
+  it('prevents duplicate non-local submissions while validation is pending', async () => {
+    const store = vi.mocked(await import('@/store/projects'))
+    let finish!: () => void
+
+    store.projectFilesystemScope.mockResolvedValueOnce('non_local')
+    store.addProjectFolder.mockImplementationOnce(() => new Promise<void>(resolve => (finish = resolve)))
+    $projectDialog.set({
+      context: { generation: 1, profile: 'remote', remoteConnection: false },
+      mode: 'add-folder',
+      projectId: 'p_remote'
+    })
+    render(<ProjectDialog />)
+
+    const path = await screen.findByRole('textbox', { name: 'Project folder path' })
+    fireEvent.change(path, { target: { value: '/workspace/repo' } })
+    const add = screen.getByRole('button', { name: 'Add path' })
+    fireEvent.click(add)
+    fireEvent.click(add)
+
+    expect(store.addProjectFolder).toHaveBeenCalledOnce()
+    finish()
+    await waitFor(() => expect(store.closeProjectDialog).toHaveBeenCalled())
+  })
+
+  it('submits the reusable open-folder text prompt without changing the raw path', async () => {
+    const store = vi.mocked(await import('@/store/projects'))
+    const context = { generation: 1, profile: 'remote', remoteConnection: false }
+
+    store.projectFilesystemScope.mockResolvedValueOnce('unknown')
+    $projectDialog.set({ context, mode: 'open-folder' })
+    render(<ProjectDialog />)
+
+    const path = await screen.findByRole('textbox', { name: 'Project folder path' })
+    fireEvent.change(path, { target: { value: '~/work/repo' } })
+    fireEvent.keyDown(path, { key: 'Enter' })
+
+    await waitFor(() => expect(store.openFolderAsProject).toHaveBeenCalledOnce())
+    expect(store.openFolderAsProject).toHaveBeenCalledWith('~/work/repo', context)
   })
 })

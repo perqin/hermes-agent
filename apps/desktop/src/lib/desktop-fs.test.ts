@@ -8,6 +8,7 @@ import {
   desktopFileDiff,
   desktopFsCacheKey,
   desktopGitRoot,
+  projectPathEntryMode,
   readDesktopDir,
   readDesktopFileDataUrl,
   readDesktopFileDataUrlLocalFirst,
@@ -62,6 +63,18 @@ function stubBridge() {
     }
   })
 }
+
+describe('project path entry mode', () => {
+  it.each([
+    ['local', false, 'native-picker'],
+    ['local', true, 'gateway-picker'],
+    ['non_local', false, 'text'],
+    ['unknown', true, 'text'],
+    [null, false, 'text']
+  ] as const)('maps %s scope with remote=%s to %s', (scope, remote, expected) => {
+    expect(projectPathEntryMode(scope, remote)).toBe(expected)
+  })
+})
 
 describe('desktop filesystem facade', () => {
   beforeEach(() => {
