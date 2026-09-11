@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,6 +41,26 @@ def _remote_board():
     )
 
 
+def test_source_task_backend_path_is_parsed_without_controller_pathlib(monkeypatch):
+    from hermes_cli import projects_db as pdb
+
+    source = SimpleNamespace(
+        id="t_source",
+        project_id="p_remote",
+        workspace_kind="worktree",
+        workspace_path=r"C:\repo\.worktrees\t_source",
+        branch_name="remote-app/t_source",
+    )
+    monkeypatch.setattr(kb, "get_task", lambda _conn, _task_id: source)
+
+    project, repo = kb._project_from_source_task(
+        object(), pdb, "p_remote", "t_source",
+    )
+
+    assert repo == r"C:\repo"
+    assert project.primary_path == r"C:\repo"
+
+
 def test_dispatcher_does_not_materialize_backend_owned_worktree(home, monkeypatch):
     _remote_board()
     with kbc.connect(board="shared") as conn:
@@ -64,6 +85,140 @@ def test_dispatcher_does_not_materialize_backend_owned_worktree(home, monkeypatc
 
     assert [row[0] for row in result.spawned] == [task_id]
     assert spawned[0][1] == f"/srv/shared/remote-app/.worktrees/{task_id}"
+
+
+def test_controller_completion_does_not_cleanup_backend_worktree_on_host(home, monkeypatch):
+    _remote_board()
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "shared")
+    with kbc.connect(board="shared") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="remote cleanup",
+            assignee="worker-b",
+            board="shared",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+        host_cleanup = []
+        monkeypatch.setattr(
+            kbw,
+            "_cleanup_worktree_workspace",
+            lambda *_args, **_kwargs: host_cleanup.append((_args, _kwargs)),
+        )
+
+        kb.complete_task(conn, task_id)
+
+    assert host_cleanup == []
+
+
+@pytest.mark.parametrize("project_id", [None, "p_remote"])
+def test_cleanup_metadata_failure_preserves_project_worktree(monkeypatch, project_id):
+    task = SimpleNamespace(project_id=project_id)
+    monkeypatch.setattr(kb, "get_task", lambda _conn, _task_id: task)
+    monkeypatch.setattr(
+        kb,
+        "read_board_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("metadata unavailable")),
+    )
+
+    bound_task, meta = kbw._backend_worktree_binding(
+        object(), "t_remote", "/srv/shared/repo/.worktrees/t_remote",
+    )
+
+    assert bound_task is task
+    assert meta == {}
+
+
+@pytest.mark.parametrize("source_filesystem_local", [False, True])
+def test_worker_completion_cleans_backend_worktree_in_cached_environment(
+    home, monkeypatch, source_filesystem_local,
+):
+    from agent import delegation_context
+    from hermes_cli import kanban_worker_workspace as worker_ws
+    import tools.terminal_tool as terminal_tool
+
+    kb.create_board(
+        "shared",
+        project_id="p_remote",
+        project_slug="remote-app",
+        source_profile="owner",
+        default_workdir="/srv/shared/remote-app",
+        default_workspace_kind="worktree",
+        filesystem_local=source_filesystem_local,
+    )
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "shared")
+    with kbc.connect(board="shared") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="remote cleanup",
+            assignee="worker-b",
+            board="shared",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+        monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+        monkeypatch.setattr(delegation_context, "is_dispatcher_owned_worker_context", lambda: True)
+        remote_env = SimpleNamespace(is_local=False)
+        monkeypatch.setattr(
+            terminal_tool,
+            "acquire_terminal_environment",
+            lambda **kwargs: remote_env,
+        )
+        backend_cleanup = []
+        monkeypatch.setattr(
+            worker_ws,
+            "cleanup_project_worktree",
+            lambda task, meta, env, **kwargs: backend_cleanup.append(
+                (task.id, meta["default_workdir"], env, kwargs["profile"])
+            ) or True,
+        )
+        monkeypatch.setattr(
+            kbw,
+            "_cleanup_worktree_workspace",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("host cleanup ran")),
+        )
+
+        kb.complete_task(conn, task_id)
+
+    assert backend_cleanup == [
+        (task_id, "/srv/shared/remote-app", remote_env, "worker-b")
+    ]
+
+
+def test_worker_child_completion_never_host_cleans_deferred_backend_parent(home, monkeypatch):
+    from agent import delegation_context
+    from hermes_cli import kanban_worker_workspace as worker_ws
+    import tools.terminal_tool as terminal_tool
+
+    _remote_board()
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "shared")
+    with kbc.connect(board="shared") as conn:
+        parent_id = kb.create_task(
+            conn, title="parent", assignee="worker-b", board="shared",
+        )
+        child_id = kb.create_task(
+            conn, title="child", assignee="worker-b", board="shared", parents=[parent_id],
+        )
+        assert kb.claim_task(conn, parent_id) is not None
+        kb.complete_task(conn, parent_id)
+        assert kb.claim_task(conn, child_id) is not None
+
+        monkeypatch.setenv("HERMES_KANBAN_TASK", child_id)
+        monkeypatch.setattr(delegation_context, "is_dispatcher_owned_worker_context", lambda: True)
+        monkeypatch.setattr(
+            terminal_tool,
+            "acquire_terminal_environment",
+            lambda **_kwargs: SimpleNamespace(is_local=False),
+        )
+        monkeypatch.setattr(worker_ws, "cleanup_project_worktree", lambda *_a, **_k: True)
+        host_cleanup = []
+        monkeypatch.setattr(
+            kbw,
+            "_cleanup_worktree_workspace",
+            lambda *args, **kwargs: host_cleanup.append((args, kwargs)),
+        )
+
+        kb.complete_task(conn, child_id)
+
+    assert host_cleanup == []
 
 
 def test_source_local_project_still_defers_materialization_to_assignee(home, monkeypatch):
@@ -97,6 +252,95 @@ def test_source_local_project_still_defers_materialization_to_assignee(home, mon
     assert spawned == [f"/owner/project/.worktrees/{task_id}"]
 
 
+def test_rebound_board_keeps_existing_task_backend_workspace_provenance(home, monkeypatch):
+    _remote_board()
+    with kbc.connect(board="shared") as conn:
+        task_id = kb.create_task(
+            conn, title="old binding", assignee="worker-b", board="shared",
+        )
+        task = kb.get_task(conn, task_id)
+        kb.write_board_metadata(
+            "shared",
+            project_id="p_new",
+            project_slug="new-project",
+            default_workdir="/srv/shared/new-project",
+            default_workspace_kind="worktree",
+            filesystem_local=False,
+        )
+        monkeypatch.setattr(
+            kbw,
+            "_resolve_worktree_workspace",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("controller touched old backend path")),
+        )
+        spawned = []
+        result = kbd.dispatch_once(
+            conn,
+            board="shared",
+            spawn_fn=lambda task, workspace, board=None: spawned.append(workspace) or 4242,
+            max_spawn=1,
+        )
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "shared")
+        host_cleanup = []
+        monkeypatch.setattr(
+            kbw,
+            "_cleanup_worktree_workspace",
+            lambda *args, **kwargs: host_cleanup.append((args, kwargs)),
+        )
+        kb.complete_task(conn, task_id)
+
+    assert [row[0] for row in result.spawned] == [task_id]
+    assert spawned == [task.workspace_path]
+    assert host_cleanup == []
+
+
+def test_worker_preflight_uses_task_snapshot_after_board_rebind(home, monkeypatch):
+    from hermes_cli import kanban_worker_workspace as worker_ws
+    import tools.terminal_tool as terminal_tool
+
+    _remote_board()
+    with kbc.connect(board="shared") as conn:
+        task_id = kb.create_task(
+            conn, title="old binding", assignee="worker-b", board="shared",
+        )
+        task = kb.get_task(conn, task_id)
+        assert kb.claim_task(conn, task_id) is not None
+    kb.write_board_metadata(
+        "shared",
+        project_id="p_new",
+        project_slug="new-project",
+        default_workdir="/srv/shared/new-project",
+        default_workspace_kind="worktree",
+        filesystem_local=False,
+    )
+
+    class SnapshotEnvironment:
+        is_local = False
+
+        def execute(self, _command, **_kwargs):
+            return {
+                "returncode": 0,
+                "output": (
+                    f"{worker_ws._ROOT_MARKER}/srv/shared/remote-app\n"
+                    f"{worker_ws._WORKSPACE_MARKER}{task.workspace_path}\n"
+                    f"{worker_ws._BRANCH_MARKER}{task.branch_name}\n"
+                ),
+            }
+
+    monkeypatch.setattr(
+        terminal_tool,
+        "acquire_terminal_environment",
+        lambda **_kwargs: SnapshotEnvironment(),
+    )
+    monkeypatch.setenv("HERMES_PROFILE", "worker-b")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "shared")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kb.kanban_db_path(board="shared")))
+    monkeypatch.setenv("HERMES_KANBAN_PROJECT_ROOT", "/srv/shared/remote-app")
+    monkeypatch.setenv("HERMES_KANBAN_PROJECT_SLUG", "remote-app")
+
+    assert worker_ws.prepare_project_workspace_from_env() == task.workspace_path
+
+
 def test_nonproject_remote_board_directory_is_not_touched_by_dispatcher(home, monkeypatch):
     kb.create_board(
         "remote-dir",
@@ -111,6 +355,7 @@ def test_nonproject_remote_board_directory_is_not_touched_by_dispatcher(home, mo
             assignee="worker-b",
             board="remote-dir",
             workspace_kind="dir",
+            workspace_path="/srv/other/output",
         )
         monkeypatch.setattr(
             kbw,
@@ -126,7 +371,76 @@ def test_nonproject_remote_board_directory_is_not_touched_by_dispatcher(home, mo
         )
 
     assert [row[0] for row in result.spawned] == [task_id]
-    assert spawned == ["/srv/shared/output"]
+    assert spawned == ["/srv/other/output"]
+
+
+def test_nonproject_remote_git_board_is_materialized_by_worker(home, monkeypatch):
+    kb.create_board(
+        "remote-git",
+        default_workdir="/srv/shared/repo",
+        default_workspace_kind="worktree",
+        filesystem_local=False,
+    )
+    with kbc.connect(board="remote-git") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="remote git",
+            assignee="worker-b",
+            board="remote-git",
+            workspace_kind="worktree",
+        )
+        task = kb.get_task(conn, task_id)
+        monkeypatch.setattr(
+            kbw,
+            "_resolve_worktree_workspace",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("controller git touched remote path")),
+        )
+        spawned = []
+        result = kbd.dispatch_once(
+            conn,
+            board="remote-git",
+            spawn_fn=lambda task, workspace, board=None: spawned.append(workspace) or 4242,
+            max_spawn=1,
+        )
+
+    assert task.workspace_path == f"/srv/shared/repo/.worktrees/{task_id}"
+    assert task.branch_name == f"wt/{task_id}"
+    assert [row[0] for row in result.spawned] == [task_id]
+    assert spawned == [task.workspace_path]
+
+
+def test_nonproject_remote_explicit_worktree_never_reaches_controller_git(home, monkeypatch):
+    kb.create_board(
+        "remote-git-explicit",
+        default_workdir="/srv/shared/repo",
+        default_workspace_kind="worktree",
+        filesystem_local=False,
+    )
+    with kbc.connect(board="remote-git-explicit") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="explicit remote git",
+            assignee="worker-b",
+            board="remote-git-explicit",
+            workspace_kind="worktree",
+            workspace_path="/other/backend/worktree",
+            branch_name="custom",
+        )
+        monkeypatch.setattr(
+            kbw,
+            "_resolve_worktree_workspace",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("controller git touched remote path")),
+        )
+        spawned = []
+        result = kbd.dispatch_once(
+            conn,
+            board="remote-git-explicit",
+            spawn_fn=lambda task, workspace, board=None: spawned.append(workspace) or 4242,
+            max_spawn=1,
+        )
+
+    assert [row[0] for row in result.spawned] == [task_id]
+    assert spawned == ["/other/backend/worktree"]
 
 
 def _task(task_id="t_remote"):
@@ -210,8 +524,44 @@ def test_worker_materializes_remote_worktree_in_assignee_environment(monkeypatch
     assert workspace == task.workspace_path
     assert branch == task.branch_name
     assert len(calls) == 1
-    assert "git worktree add" in calls[0][0]
+    command = calls[0][0]
+    assert command.startswith("(\nset -eu")
+    assert command.endswith("\n)")
+    assert "git worktree add" in command
     assert calls[0][1]["timeout"] <= 120
+
+
+def test_worker_cleans_safe_remote_worktree_in_assignee_environment():
+    from hermes_cli import kanban_worker_workspace as worker_ws
+
+    task = _task()
+    calls = []
+
+    class FakeRemoteEnvironment:
+        is_local = False
+
+        def execute(self, command, **kwargs):
+            calls.append((command, kwargs))
+            return {
+                "returncode": 0,
+                "output": f"{worker_ws._CLEANUP_MARKER}removed\n",
+            }
+
+    removed = worker_ws.cleanup_project_worktree(
+        task,
+        {"default_workdir": "/srv/shared/remote-app"},
+        FakeRemoteEnvironment(),
+        profile="worker-b",
+    )
+
+    assert removed is True
+    command = calls[0][0]
+    assert "status_output=$(git -C" in command
+    assert "status --porcelain --untracked-files=normal) || exit 43" in command
+    assert "remote_refs=$(git -C" in command
+    assert "branch -r --contains HEAD) || exit 43" in command
+    assert "worktree remove" in command
+    assert calls[0][1]["rewrite_compound_background"] is False
 
 
 def test_worker_validates_remote_directory_without_git():
@@ -347,10 +697,11 @@ def test_failed_worker_preflight_blocks_task_with_profile_and_path(home, monkeyp
                 "output": f"{worker_ws._ROOT_MARKER}/different/root\n",
             }
 
+    acquired_with = []
     monkeypatch.setattr(
         terminal_tool,
         "acquire_terminal_environment",
-        lambda **_kwargs: WrongFilesystem(),
+        lambda **kwargs: acquired_with.append(kwargs) or WrongFilesystem(),
         raising=False,
     )
     monkeypatch.setenv("HERMES_PROFILE", "worker-b")
@@ -361,6 +712,8 @@ def test_failed_worker_preflight_blocks_task_with_profile_and_path(home, monkeyp
 
     with pytest.raises(ValueError, match="worker-b.*srv/shared/remote-app"):
         worker_ws.prepare_project_workspace_from_env()
+
+    assert acquired_with == [{"task_id": task_id}]
 
     with kbc.connect(board="shared") as conn:
         task = kb.get_task(conn, task_id)

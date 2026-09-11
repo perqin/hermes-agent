@@ -875,6 +875,7 @@ export interface Translations {
     boardSettings?: string;
     boardSettingsTitle?: string;
     boardSettingsTitleFor?: string;
+    projectDirectoryExplanation?: string;
     projectDirectoryOverrideHint?: string;
     saving?: string;
     commentHint?: string;

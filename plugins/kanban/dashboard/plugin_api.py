@@ -1325,8 +1325,22 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
     workdir = str(board.get("default_workdir") or "").strip()
     if not workdir:
         return "scratch"
-    # Unknown/remote legacy rows must not probe a backend path on this host.
-    if board.get("filesystem_local") is not True:
+    # Preserve the historical local-Git probe for legacy rows only when the
+    # current profile declares a local terminal filesystem. Unknown and remote
+    # profiles must never interpret the stored path on this host.
+    filesystem_local = board.get("filesystem_local")
+    if filesystem_local is None:
+        try:
+            from tools.terminal_tool import _get_env_config
+            from tools.terminal_tool_backends import terminal_filesystem_scope
+
+            config = _get_env_config()
+            filesystem_local = terminal_filesystem_scope(
+                str(config.get("env_type") or "local")
+            ) == "local"
+        except Exception:
+            filesystem_local = False
+    if filesystem_local is not True:
         return "dir"
     try:
         return "worktree" if kbw._git_toplevel(Path(workdir)) else "dir"
@@ -1398,8 +1412,14 @@ def create_board_endpoint(payload: CreateBoardBody):
     """Create a board. Idempotent — ``slug`` collision returns the existing one."""
     workspace = _validate_workdir(payload.default_workdir) if payload.default_workdir else None
     project_id, _pname, primary_path, project_slug, project = _resolve_project(payload.project_id)
-    if primary_path and workspace is None:
-        workspace = _validate_workdir(primary_path)
+    if primary_path:
+        project_workspace = _validate_workdir(primary_path)
+        if workspace is not None and workspace["default_workdir"] != project_workspace["default_workdir"]:
+            raise HTTPException(
+                status_code=400,
+                detail="A Project-bound board must use its canonical primary path.",
+            )
+        workspace = project_workspace
     binding = workspace or {}
     source_profile = None
     if project_id:
@@ -1442,8 +1462,17 @@ def rename_board(slug: str, payload: RenameBoardBody):
     project = None
     if payload.project_id is not None and payload.project_id.strip():
         project_id, _pname, primary_path, project_slug, project = _resolve_project(payload.project_id)
-        if primary_path and payload.default_workdir is None:
-            workspace = _validate_workdir(primary_path)
+        if primary_path:
+            project_workspace = _validate_workdir(primary_path)
+            if (
+                payload.default_workdir is not None
+                and workspace.get("default_workdir") != project_workspace["default_workdir"]
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="A Project-bound board must use its canonical primary path.",
+                )
+            workspace = project_workspace
     elif payload.project_id == "":
         project_id = ""
 

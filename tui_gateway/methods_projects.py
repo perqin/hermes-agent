@@ -236,6 +236,19 @@ def _is_session_cwd_junk(cwd: str) -> bool:
     return real in _non_workspace_dirs() or real == hermes_home
 
 
+def _is_backend_cwd_junk(cwd: str) -> bool:
+    """Conservative junk detection without interpreting a backend path on this host."""
+    from hermes_cli.project_paths import canonical_path_key, path_segments
+
+    if not cwd:
+        return True
+    style, key = canonical_path_key(cwd)
+    if style == "posix":
+        return key in {".", "/", "/home", "/Users"}
+    segments = path_segments(cwd)
+    return len(segments) == 1 and segments[0].endswith(":")
+
+
 def _repo_discovery_policy(raw: dict | None = None) -> dict:
     """Return the effective, profile-local Desktop repository scan policy."""
     from hermes_cli.config import DEFAULT_CONFIG
@@ -459,10 +472,12 @@ def _build_project_tree(
         git_probe.warm_roots(
             [str(f.get("path") or "") for p in projects for f in (p.get("folders") or [])]
             + [str(r.get("root") or "") for r in discovered])
+    junk_root = _is_repo_junk if filesystem_local else _is_backend_cwd_junk
+    junk_cwd = _is_session_cwd_junk if filesystem_local else _is_backend_cwd_junk
     tree = project_tree.build_tree(
         projects, sessions, discovered,
         git_probe.resolve if filesystem_local else (lambda _path: None), preview_limit=preview_limit,
-        hydrate=hydrate, is_junk_root=_is_repo_junk, is_junk_cwd=_is_session_cwd_junk,
+        hydrate=hydrate, is_junk_root=junk_root, is_junk_cwd=junk_cwd,
         exists=_dir_exists_cached if filesystem_local else (lambda _path: True))
     return tree, active_id
 

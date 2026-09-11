@@ -176,13 +176,29 @@ def _backend_owned_project_binding(task: "Task", board: Optional[str]) -> Option
         and meta.get("default_workdir")
     ):
         return meta
-    if (
-        meta.get("filesystem_local") is False
-        and meta.get("default_workdir")
-        and getattr(task, "workspace_kind", None) == "dir"
-        and str(getattr(task, "workspace_path", "") or "") == str(meta["default_workdir"])
-    ):
-        return meta
+    if getattr(task, "project_id", None) and getattr(task, "workspace_kind", None) == "worktree":
+        from hermes_cli.kanban_project_paths import worktree_root_for_task
+
+        root = worktree_root_for_task(
+            str(getattr(task, "workspace_path", "") or ""),
+            str(getattr(task, "id", "") or ""),
+        )
+        if root:
+            branch_prefix = str(getattr(task, "branch_name", "") or "").partition("/")[0]
+            return {
+                "project_id": task.project_id,
+                "project_slug": branch_prefix,
+                "default_workdir": root,
+                "default_workspace_kind": "worktree",
+                "filesystem_local": None,
+            }
+    if meta.get("filesystem_local") is False and meta.get("default_workdir"):
+        kind = getattr(task, "workspace_kind", None)
+        workspace = str(getattr(task, "workspace_path", "") or "")
+        if kind == "dir" and workspace:
+            return meta
+        if kind == "worktree" and workspace:
+            return meta
     return None
 
 

@@ -1204,12 +1204,10 @@ def _project_from_source_task(
         and source_task.workspace_path
     ):
         return None, None
-    source_path = Path(source_task.workspace_path)
-    if not (
-        source_path.is_absolute()
-        and source_path.name == source_task.id
-        and source_path.parent.name == ".worktrees"
-    ):
+    from hermes_cli.kanban_project_paths import worktree_root_for_task
+
+    project_repo = worktree_root_for_task(source_task.workspace_path, source_task.id)
+    if project_repo is None:
         return None, None
     project_slug = None
     if source_task.branch_name:
@@ -1222,7 +1220,6 @@ def _project_from_source_task(
             project_slug = _pdb.normalize_slug(project_id)
     if not project_slug:
         return None, None
-    project_repo = str(source_path.parent.parent)
     project_obj = _pdb.Project(
         id=project_id, slug=project_slug, name=project_slug, created_at=0, primary_path=project_repo,
     )
@@ -1322,6 +1319,13 @@ def create_task(
             project_id = inherited_snapshot[0].id
             if workspace_kind is None:
                 workspace_kind = inherited_snapshot[2]
+        else:
+            # Compatibility for Boards written before self-contained binding
+            # snapshots: resolve their legacy project_id in the current profile,
+            # exactly as create_task did before snapshot metadata existed.
+            legacy_project_id = str(_board_meta_for(board).get("project_id") or "").strip()
+            if legacy_project_id:
+                project_id = legacy_project_id
     if workspace_kind is None:
         workspace_kind = "scratch"
     if workspace_kind not in VALID_WORKSPACE_KINDS:
@@ -1363,10 +1367,18 @@ def create_task(
 
     # Only persistent kinds inherit the board ``default_workdir``: a scratch
     # task inheriting it would point cleanup at the user's source tree.
+    board_meta = _board_meta_for(board)
     if workspace_path is None and project_repo is None and workspace_kind in {"dir", "worktree"}:
-        board_default = _board_meta_for(board).get("default_workdir")
+        board_default = board_meta.get("default_workdir")
         if board_default:
             workspace_path = str(board_default)
+
+    backend_board_worktree = (
+        project_obj is None
+        and workspace_kind == "worktree"
+        and board_meta.get("filesystem_local") is False
+        and workspace_path == str(board_meta.get("default_workdir") or "")
+    )
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
@@ -1384,6 +1396,12 @@ def create_task(
                         workspace_path = project_repo.rstrip("/\\") + separator + separator.join((".worktrees", task_id))
                     if not branch_name:
                         branch_name = _project_branch_name(project_obj, task_id, title)
+                elif backend_board_worktree:
+                    root = str(board_meta["default_workdir"])
+                    separator = "\\" if "\\" in root and "/" not in root else "/"
+                    workspace_path = root.rstrip("/\\") + separator + separator.join((".worktrees", task_id))
+                    if not branch_name:
+                        branch_name = f"wt/{task_id}"
 
                 conn.execute(
                     """

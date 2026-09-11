@@ -880,6 +880,8 @@ export const en: Translations = {
     boardSettingsTitle:
       "Board settings — name, description, and the default project directory new tasks inherit",
     boardSettingsTitleFor: "Board settings — {name}",
+    projectDirectoryExplanation:
+      "The absolute path is resolved in this request profile's terminal environment when saved.",
     projectDirectoryOverrideHint:
       "New tasks inherit this as their workspace default; each task can still override it in the create dialog.",
     saving: "Saving…",

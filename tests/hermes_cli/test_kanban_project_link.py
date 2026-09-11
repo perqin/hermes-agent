@@ -226,3 +226,20 @@ def test_bind_rejects_board_owned_by_another_project(monkeypatch):
         assert pdb.get_project(conn, proj.id).board_slug is None
 
 
+def test_unbind_reports_metadata_rollback_failure(monkeypatch):
+    from hermes_cli import kanban_project_binding as binding
+
+    proj = _make_project(repo="/tmp/unbind-rollback")
+    kb.create_board("shared", project_id=proj.id, default_workdir=proj.primary_path)
+    with pdb.connect_closing() as conn:
+        monkeypatch.setattr(pdb, "update_project", lambda *_a, **_k: False)
+        monkeypatch.setattr(
+            binding,
+            "_restore_metadata",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("restore failed")),
+        )
+
+        with pytest.raises(ValueError, match="metadata rollback failed"):
+            binding.clear_owned_project_binding(conn, proj, "shared")
+
+

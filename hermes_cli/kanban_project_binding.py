@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import shutil
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -73,8 +72,10 @@ def clear_owned_project_binding(project_conn, project: Any, board: str) -> None:
         if not pdb.update_project(project_conn, project.id, board_slug=""):
             raise ValueError(f"project {project.slug!r} disappeared during unbind")
     except Exception as exc:
-        with contextlib.suppress(OSError):
+        try:
             _restore_metadata(path, before)
+        except OSError:
+            raise ValueError("board unbind failed and metadata rollback failed") from None
         if isinstance(exc, ValueError):
             raise
         raise ValueError("board unbind failed before reciprocal metadata was committed") from None

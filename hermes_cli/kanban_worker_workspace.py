@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional
 _ROOT_MARKER = "__HERMES_KANBAN_ROOT__="
 _WORKSPACE_MARKER = "__HERMES_KANBAN_WORKSPACE__="
 _BRANCH_MARKER = "__HERMES_KANBAN_BRANCH__="
+_CLEANUP_MARKER = "__HERMES_KANBAN_CLEANUP__="
 _PREFLIGHT_TIMEOUT_SECONDS = 120
 
 
@@ -32,7 +33,7 @@ def _single_marked(output: str, marker: str) -> Optional[str]:
 
 def _remote_materialize_command(root: str, target: str, branch: str) -> str:
     qroot, qtarget, qbranch = map(shlex.quote, (root, target, branch))
-    return f"""
+    script = f"""
 set -eu
 expected_root={qroot}
 target={qtarget}
@@ -71,6 +72,7 @@ fi
 printf '%s%s\\n' {_WORKSPACE_MARKER!r} "$actual_target"
 printf '%s%s\\n' {_BRANCH_MARKER!r} "$actual_branch"
 """.strip()
+    return f"(\n{script}\n)"
 
 
 def _remote_directory_command(path: str) -> str:
@@ -82,6 +84,64 @@ actual=$(cd -- "$expected" && pwd -P)
 printf '%s%s\\n' {_ROOT_MARKER!r} "$actual"
 [ "$actual" = "$expected" ] || exit 42
 """.strip()
+
+
+def _remote_cleanup_command(root: str, target: str, branch: str) -> str:
+    qroot, qtarget, qbranch = map(shlex.quote, (root, target, branch))
+    script = f"""
+set -eu
+expected_root={qroot}
+target={qtarget}
+branch={qbranch}
+actual_root=$(cd -- "$expected_root" && pwd -P)
+[ "$actual_root" = "$expected_root" ] || exit 42
+[ -d "$target" ] || {{ printf '%s%s\\n' {_CLEANUP_MARKER!r} missing; exit 0; }}
+actual_target=$(cd -- "$target" && pwd -P)
+[ "$actual_target" = "$target" ] || exit 42
+target_parent=$(dirname -- "$actual_target")
+[ "$target_parent" = "${{actual_root%/}}/.worktrees" ] || exit 42
+status_output=$(git -C "$actual_target" status --porcelain --untracked-files=normal) || exit 43
+[ -z "$status_output" ] || {{ printf '%s%s\\n' {_CLEANUP_MARKER!r} preserved; exit 0; }}
+remote_refs=$(git -C "$actual_target" branch -r --contains HEAD) || exit 43
+[ -n "$remote_refs" ] || {{ printf '%s%s\\n' {_CLEANUP_MARKER!r} preserved; exit 0; }}
+git -C "$actual_root" worktree remove -- "$actual_target"
+case "$branch" in wt/*) git -C "$actual_root" branch -D -- "$branch" >/dev/null 2>&1 || true ;; esac
+printf '%s%s\\n' {_CLEANUP_MARKER!r} removed
+""".strip()
+    return f"(\n{script}\n)"
+
+
+def cleanup_project_worktree(
+    task: Any,
+    board_meta: Mapping[str, Any],
+    env: Any,
+    *,
+    profile: str,
+) -> bool:
+    """Remove a safe backend worktree; preserve dirty or unpushed work."""
+    root = str(board_meta.get("default_workdir") or "").strip()
+    target = str(getattr(task, "workspace_path", None) or "").strip()
+    branch = str(getattr(task, "branch_name", None) or "").strip()
+    if not (root and target):
+        return False
+    try:
+        result = env.execute(
+            _remote_cleanup_command(root, target, branch),
+            timeout=60,
+            rewrite_compound_background=False,
+        )
+    except Exception:
+        return False
+    if int(_result_field(result, "returncode", 1) or 0) != 0:
+        return False
+    status = _single_marked(_result_field(result, "output", ""), _CLEANUP_MARKER)
+    if status == "removed":
+        return True
+    if status in {"missing", "preserved"}:
+        return False
+    raise ValueError(
+        f"profile {profile!r} returned an invalid backend worktree cleanup result"
+    )
 
 
 def materialize_project_workspace(
@@ -174,12 +234,18 @@ def prepare_project_workspace_from_env() -> Optional[str]:
         task = kb.get_task(conn, task_id)
         if task is None:
             raise ValueError(f"Kanban task {task_id!r} disappeared before workspace preflight")
-        meta = kb.read_board_metadata(board)
+        meta = dict(kb.read_board_metadata(board))
+        # The dispatcher snapshots the task's execution root into the worker
+        # environment. It remains authoritative if the shared Board is rebound
+        # before this already-created task starts.
+        meta["default_workdir"] = project_root
+        if task.project_id:
+            meta["project_id"] = task.project_id
+        project_slug = (os.environ.get("HERMES_KANBAN_PROJECT_SLUG") or "").strip()
+        if project_slug:
+            meta["project_slug"] = project_slug
         try:
-            env = acquire_terminal_environment(
-                task_id=task_id,
-                operation_scope=f"kanban-worker:{profile}:{task_id}",
-            )
+            env = acquire_terminal_environment(task_id=task_id)
             workspace, branch = materialize_project_workspace(task, meta, env, profile=profile)
         except Exception as exc:
             reason = str(exc) if isinstance(exc, ValueError) else (

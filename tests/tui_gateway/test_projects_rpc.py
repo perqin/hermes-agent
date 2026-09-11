@@ -231,10 +231,14 @@ def test_project_tree_groups_remote_cwd_without_controller_path_or_git_probe(mon
         "id": "s_remote", "cwd": remote + "/src", "title": "Remote session",
         "started_at": 1, "last_active": 1,
     }
+    unmatched = {
+        "id": "s_other", "cwd": "/remote/other", "title": "Other remote session",
+        "started_at": 2, "last_active": 2,
+    }
     monkeypatch.setattr(server, "_project_filesystem_is_local", lambda: False)
     monkeypatch.setattr(
         server, "_project_tree_inputs",
-        lambda *_a, **_kw: ([session], [project], [], None),
+        lambda *_a, **_kw: ([session, unmatched], [project], [], None),
     )
     monkeypatch.setattr(
         server.git_probe, "warm_roots",
@@ -248,13 +252,19 @@ def test_project_tree_groups_remote_cwd_without_controller_path_or_git_probe(mon
         server.os.path, "isdir",
         lambda *_a: (_ for _ in ()).throw(AssertionError("controller isdir called")),
     )
+    monkeypatch.setattr(
+        server.os.path, "realpath",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("controller realpath called")),
+    )
 
     tree, _active = server._build_project_tree(
         object(), preview_limit=3, hydrate=True, session_limit=5,
         include_discovered=False)
 
-    assert tree["projects"][0]["id"] == "p_remote"
-    assert tree["projects"][0]["sessionCount"] == 1
+    remote_node = next(node for node in tree["projects"] if node["id"] == "p_remote")
+    other_node = next(node for node in tree["projects"] if node["id"] == "/remote/other")
+    assert remote_node["sessionCount"] == 1
+    assert other_node["repos"][0]["groups"][0]["sessions"][0]["id"] == "s_other"
 
 
 def test_create_list_roundtrip(tmp_path):

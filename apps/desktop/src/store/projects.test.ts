@@ -86,6 +86,7 @@ const fs = await import('@/lib/desktop-fs')
 const desktopDefaultCwd = vi.mocked(fs.desktopDefaultCwd)
 const isDesktopFsRemoteMode = vi.mocked(fs.isDesktopFsRemoteMode)
 const selectDesktopPaths = vi.mocked(fs.selectDesktopPaths)
+const writeDesktopFileText = vi.mocked(fs.writeDesktopFileText)
 
 const gw = await import('@/store/gateway')
 const activeGateway = vi.mocked(gw.activeGateway)
@@ -1277,5 +1278,45 @@ describe('authoritative project path mutations', () => {
     await expect(pending).rejects.toThrow('Active Hermes profile changed')
     expect($projectScope.get()).toBe(ALL_PROJECTS)
     expect($startWorkSessionRequest.get()).toBeNull()
+  })
+
+  it('does not write IDEA.md through the host filesystem for a non-local project path', async () => {
+    const created = {
+      archived: false,
+      board_slug: null,
+      color: null,
+      created_at: 1,
+      description: null,
+      folders: [{ added_at: 1, is_primary: true, label: null, path: '/workspace/repo' }],
+      icon: null,
+      id: 'p_remote',
+      name: 'Remote',
+      primary_path: '/workspace/repo',
+      slug: 'remote'
+    }
+
+    const request = vi.fn(async (method: string) => {
+      if (method === 'projects.capabilities') {return { filesystem_scope: 'non_local' }}
+
+      if (method === 'projects.create') {return { project: created }}
+
+      return { active_id: created.id, projects: [created], scoped_session_ids: [] }
+    })
+
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+    const context = captureProjectPathContext()!
+
+    await createProject({
+      context,
+      folders: ['../repo'],
+      idea: 'Build the remote project',
+      name: 'Remote',
+      primaryPath: '../repo'
+    })
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith('projects.capabilities', { profile: 'default' })
+    )
+
+    expect(writeDesktopFileText).not.toHaveBeenCalled()
   })
 })

@@ -214,6 +214,33 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_dispatcher_kanban_worker_reuses_board_task_id(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_backend_workspace")
+    monkeypatch.setattr(
+        "agent.delegation_context.is_dispatcher_owned_worker_context",
+        lambda: True,
+    )
+
+    agent = _FakeAgent()
+    ctx = _build(agent)
+
+    assert ctx.effective_task_id == "t_backend_workspace"
+    assert agent._current_task_id == "t_backend_workspace"
+
+
+def test_turn_facade_routes_dispatcher_worker_to_board_task_id(monkeypatch):
+    from agent import turn_facade
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_backend_workspace")
+    monkeypatch.setattr(
+        "agent.delegation_context.is_dispatcher_owned_worker_context",
+        lambda: True,
+    )
+
+    assert turn_facade._effective_task_id(None) == "t_backend_workspace"
+    assert turn_facade._effective_task_id("explicit") == "explicit"
+
+
 def test_preflight_timeout_stops_turn_before_provider_boundary():
     """An unchanged oversized payload must not escape turn construction."""
     agent = _FakeAgent()

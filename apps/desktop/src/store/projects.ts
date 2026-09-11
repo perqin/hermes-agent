@@ -888,10 +888,14 @@ export async function generateProjectIdea(name: string): Promise<string> {
   }
 }
 
-// Write IDEA.md to a project's primary folder (best-effort). Routes through the
-// remote-aware fs write, so it lands on the backend for a remote gateway and on
-// disk locally — the project is created regardless of whether the file lands.
-async function writeProjectIdea(folder: null | string | undefined, idea: string): Promise<void> {
+// Write IDEA.md only when the Project filesystem is the gateway filesystem.
+// A terminal-non-local path must never be handed to Electron or /api/fs; Project
+// creation still succeeds when the optional best-effort file cannot be written.
+async function writeProjectIdea(
+  context: ProjectPathContext,
+  folder: null | string | undefined,
+  idea: string
+): Promise<void> {
   const dir = (folder || '').trim()
   const body = idea.trim()
 
@@ -900,6 +904,10 @@ async function writeProjectIdea(folder: null | string | undefined, idea: string)
   }
 
   try {
+    if ((await projectFilesystemScope(context)) !== 'local') {
+      return
+    }
+
     await writeDesktopFileText(`${dir.replace(/[/\\]+$/, '')}/IDEA.md`, body.endsWith('\n') ? body : `${body}\n`)
   } catch {
     // Best-effort: the project is created regardless of whether IDEA.md lands.
@@ -990,11 +998,12 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
   }
 
   let res: { project: ProjectInfo | null }
+  let context: ProjectPathContext
 
   try {
     // All profiles filters the sidebar, not the owner of a new project.
     // Capture the live route so reconnecting cannot retarget the write.
-    const context = input.context
+    context = input.context
       ? await resolveProjectPathContext(input.context)
       : await resolveProjectPathContext()
 
@@ -1039,7 +1048,11 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
 
   if (created) {
     if (input.idea) {
-      void writeProjectIdea(created.primary_path ?? created.folders?.[0]?.path ?? input.primaryPath, input.idea)
+      void writeProjectIdea(
+        context,
+        created.primary_path ?? created.folders?.[0]?.path ?? input.primaryPath,
+        input.idea
+      )
     }
 
     applyAuthoritativeProject(created)

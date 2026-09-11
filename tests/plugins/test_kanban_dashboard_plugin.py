@@ -139,6 +139,20 @@ def test_patch_board_sets_project_directory(client, tmp_path):
     )
 
 
+def test_legacy_board_keeps_local_git_workspace_detection(monkeypatch):
+    import tools.terminal_tool as terminal_tool
+
+    _load_plugin_router()
+    plugin_api = sys.modules["hermes_dashboard_plugin_kanban_test"]
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "local"})
+    monkeypatch.setattr(plugin_api.kbw, "_git_toplevel", lambda path: path)
+
+    assert plugin_api._default_workspace_kind({
+        "default_workdir": "/legacy/local/repo",
+        "filesystem_local": None,
+    }) == "worktree"
+
+
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
     """Scheduled/time-delay tasks must not be silently bucketed into todo."""
 

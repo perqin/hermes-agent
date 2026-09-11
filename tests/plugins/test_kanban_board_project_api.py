@@ -225,7 +225,7 @@ def test_project_binding_derives_source_profile_and_updates_both_sides(
         assert pdb.get_project(conn, project["id"]).board_slug == "bound-remote"
 
 
-def test_project_binding_with_explicit_directory_preserves_explicit_override(
+def test_project_binding_rejects_conflicting_explicit_directory(
     client, project, monkeypatch,
 ):
     resolved = {
@@ -249,14 +249,17 @@ def test_project_binding_with_explicit_directory_preserves_explicit_override(
     response = client.post(
         "/api/plugins/kanban/boards",
         json={
-            "slug": "explicit-override",
+            "slug": "conflicting-override",
             "project_id": project["id"],
             "default_workdir": "/srv/explicit",
         },
     )
 
-    assert response.status_code == 200, response.text
-    assert response.json()["board"]["default_workdir"] == "/srv/explicit-canonical"
+    assert response.status_code == 400
+    assert "must use its canonical primary path" in response.json()["detail"]
+    assert not kb.board_exists("conflicting-override")
+    with pdb.connect_closing() as conn:
+        assert pdb.get_project(conn, project["id"]).board_slug is None
 
 
 def test_idempotent_create_restores_existing_board_if_project_link_fails(
