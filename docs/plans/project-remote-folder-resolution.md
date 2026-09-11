@@ -4,7 +4,7 @@
 
 **Goal:** Make Project folder paths canonical in their terminal-backend filesystem namespace and carry that namespace contract through Project-bound Kanban boards: preserve current local behavior, resolve non-local paths in the terminal environment, and require every assigned board worker profile to be able to access the same backend path.
 
-**Architecture:** Add one Project path resolver above `projects_db`. It acquires the configured terminal environment through the existing terminal runtime/factory, classifies filesystem locality from the environment capability (`env.is_local`) rather than a backend-name list, and either applies the existing host-local normalization or performs a bounded backend-side `cd` + `pwd -P`. All externally reachable Project folder mutations use this resolver before entering a database transaction; `projects_db` receives an explicit “already canonical” signal so a controller OS cannot reinterpret a remote path. Binding a Project to a Kanban board snapshots the Project's canonical primary path as the board workspace contract. The dispatcher resolves and materializes a task workspace through the assignee profile's terminal environment; successful backend-side access is the proof that the profile satisfies the board contract.
+**Architecture:** Add one Project path resolver above `projects_db`. It acquires the configured terminal environment through the existing terminal runtime/factory, classifies filesystem locality from the environment capability (`env.is_local`) rather than a backend-name list, and either applies the existing host-local normalization or performs a bounded backend-side `cd` + `pwd -P`. All externally reachable Project folder mutations use this resolver before entering a database transaction; `projects_db` receives an explicit “already canonical” signal so a controller OS cannot reinterpret a remote path. A lightweight provider-level tri-state exposes the same locality contract to frontends without starting a sandbox: Desktop combines it with connection locality to choose native picker, gateway-host picker, or text entry, while submit-time resolution remains authoritative. Binding a Project to a Kanban board snapshots the Project's canonical primary path as the board workspace contract. The dispatcher resolves and materializes a task workspace through the assignee profile's terminal environment; successful backend-side access is the proof that the profile satisfies the board contract.
 
 **Tech stack:** Python, argparse, SQLite, terminal `BaseEnvironment`/plugin providers, TUI/Desktop JSON-RPC, React/TypeScript nanostores, pytest, Vitest.
 
@@ -20,7 +20,10 @@
 - `projects.create`, `projects.add_folder`, `projects.remove_folder`, and `projects.set_primary` JSON-RPC methods used by Desktop/TUI/dashboard.
 - The `desktop_project` agent tool's `create` action.
 - Profile-correct terminal configuration, credentials, environment cache identity, and error propagation for project RPCs.
+- A provider-neutral, profile-scoped filesystem-locality capability for Project path-entry UIs.
+- Desktop picker-versus-text behavior across native, remote-gateway, and terminal-non-local cases, including every create/add/open entrypoint.
 - Immediate Desktop reconciliation to the canonical path returned by the backend.
+- Web/Kanban dashboard Project-directory validation, error handling, canonical response state, and translated helper copy.
 - Project ownership/session-workspace consumers that would otherwise reinterpret or reject the newly canonical remote path on the controller host.
 - Project-bound Kanban board metadata, task workspace derivation, backend-side worktree materialization, and worker startup for a shared backend path.
 
@@ -43,6 +46,9 @@
 15. **Backend-side materialization:** local assignees retain the existing controller-local `Path`/Git/Popen flow. Non-local assignees create, inspect, and reuse Project worktrees through their terminal environment; the dispatcher must never run controller-local Git against a backend-owned path.
 16. **No backend identity enum:** the board need not persist a built-in backend name. Environment capability plus successful access to the canonical board path is the runtime compatibility check. Profiles are operationally required to target the same durable/shared backend filesystem.
 17. **Workspace authority:** the task-derived Project/board workspace overrides a profile's default `terminal.cwd`; the profile still supplies backend, image, mount, network, resource, credentials, and model/tool policy.
+18. **Frontend locality is profile-scoped:** UI path-entry mode is derived from the active profile's terminal-filesystem capability, not from Desktop connection mode and not from a backend-name list.
+19. **Desktop input modes:** when the active profile's terminal filesystem is local, retain the existing picker appropriate to the connection (native Electron picker for a local connection, in-app gateway-host browser for a remote connection). When the terminal filesystem is non-local or capability is unknown, show a plain path input and never browse the controller/gateway filesystem.
+20. **Submit is authoritative:** frontends may trim only for empty-value UX; they do not normalize, expand, stat, or pre-canonicalize Project paths. `projects.create`/`projects.add_folder` resolve and validate through the terminal environment, keep the dialog/input on failure, and return the canonical stored path on success.
 
 ### Non-goals
 
@@ -71,6 +77,9 @@
 - The Project workspace callback still performs controller-side `abspath`/`isdir` and silently returns for remote-only paths (`tui_gateway/agent_callbacks.py:129-155`); `tools/project_tools.py:33-39` also swallows callback failures.
 - Project ownership still normalizes with controller `os.path`/`os.sep` in `hermes_cli/projects_db.py:469-484`; the pure path-style-aware comparison model already exists in `tui_gateway/project_tree.py:54-73` and should be moved/reused at a lower layer rather than imported upward from the gateway.
 - Desktop create/add-folder cache updates: `apps/desktop/src/store/projects.ts:873-953` and `:1029-1070`.
+- Desktop currently chooses local native picker versus gateway-host in-app picker from connection mode (`apps/desktop/src/lib/desktop-fs.ts:210-224`), not from the active profile's terminal backend. `ProjectDialog` always invokes that picker (`apps/desktop/src/app/chat/sidebar/project-dialog.tsx:113-133,207-258,310-315`), so a locally connected Docker/SSH/plugin profile browses the wrong filesystem.
+- `openFolderAsProject()` and all of its menu/keybinding/palette entrypoints also call the same picker (`apps/desktop/src/store/projects.ts:1363-1419`); they must use the same profile-aware path-entry policy rather than retaining a hidden native-picker path.
+- The React Web dashboard has no standalone Project-management page; `/chat` embeds the real TUI. Its relevant structured frontend is the Kanban dashboard plugin. That plugin already uses text inputs for Board project directories (`plugins/kanban/dashboard/dist/index.js:2193-2278,2317-2392`), but `plugin_api.py:_validate_workdir` validates with controller `Path.expanduser/is_dir/resolve` (`:1369-1416`) and therefore rejects or rewrites backend-owned paths.
 
 ---
 
@@ -199,7 +208,33 @@
 
 **Acceptance:** A multiplexed backend cannot validate a profile-B path against profile A's host, credentials, policy, or cached environment.
 
-### Task 6: Remove host normalization from the agent Project tool
+### Task 6: Expose the active profile's Project path-entry capability
+
+**Objective:** Give Desktop and structured Web surfaces a profile-scoped locality fact without teaching them backend names or making UI rendering create a sandbox.
+
+**Files:**
+
+- Modify: `agent/terminal_env_provider.py`
+- Modify: `agent/terminal_env_registry.py`
+- Modify: `tools/terminal_tool_backends.py`
+- Modify: `tui_gateway/methods_projects.py`
+- Modify: `apps/desktop/src/types/hermes.ts`
+- Test: `tests/agent/test_terminal_env_registry.py`
+- Test: `tests/tui_gateway/test_projects_rpc.py`
+
+**Steps:**
+
+1. Add one lightweight terminal-filesystem locality query backed by the same provider/environment capability contract as the resolver. Extend `TerminalEnvironmentProvider` with a declarative `filesystem_local` capability (default false for isolated plugin filesystems), and expose built-in capability through the terminal backend factory/spec layer so Project/UI callers never maintain their own backend-name set. Assert that metadata agrees with the live environment's `env.is_local`. The query must not cold-start SSH/container/cloud environments merely to paint a dialog.
+2. Built-in and plugin registrations expose whether their configured environment runs on the controller filesystem. Preserve uncertainty rather than mislabeling it: an unknown/malformed/unavailable provider capability is `unknown`, and the UI treats it like non-local for picker safety. Actual submission still acquires the environment and is authoritative.
+3. Add a profile-scoped `projects.capabilities` RPC, or an additive equivalent on the existing Projects payload, returning a provider-neutral tri-state such as `{filesystem_scope: "local" | "non_local" | "unknown"}`. Prefer a dedicated capability response if adding it to `projects.list` would make stale backends or read caches ambiguous.
+4. Resolve the fact inside the same requested-profile home/terminal-provider scope used by Project mutations. A request for profile B must never report profile A's capability.
+5. Keep the wire provider-neutral. Do not return a frontend decision based on names such as `docker` or `ssh`; the frontend combines `filesystem_scope` with its own connection mode to choose native picker, gateway-host picker, or text entry.
+6. In Desktop, cache the result by exact gateway connection plus profile and invalidate/refetch on profile switch, gateway reconnect, or terminal-backend change. While loading, after failure, and against an older backend missing the capability method, default to text entry rather than opening a picker on an unproven filesystem.
+7. Add one profile-isolation test with local profile A and plugin-remote profile B, plus a missing-capability compatibility test proving the result is explicitly `unknown` rather than guessed from a backend string.
+
+**Acceptance:** Every Project path-entry surface can decide whether browsing the controller/gateway filesystem is valid for the exact active profile, while submit-time backend resolution remains the source of truth.
+
+### Task 7: Remove host normalization from the agent Project tool
 
 **Objective:** Keep model-driven Project creation consistent with CLI and RPC paths.
 
@@ -221,7 +256,7 @@
 
 **Acceptance:** CLI, RPC, and agent-tool creation persist the same path for the same profile/environment/input.
 
-### Task 7: Remove controller-local assumptions from Project path consumers
+### Task 8: Remove controller-local assumptions from Project path consumers
 
 **Objective:** Ensure a correctly stored remote folder remains usable for project ownership and session cwd propagation.
 
@@ -245,7 +280,7 @@
 
 **Acceptance:** Correct remote storage is not undone by a later host-local check, and local deleted-cwd healing remains unchanged.
 
-### Task 8: Make a Project-bound board carry a self-contained workspace contract
+### Task 9: Make a Project-bound board carry a self-contained workspace contract
 
 **Objective:** Let a global Board use a per-profile Project path without requiring every assignee profile to duplicate the Project row.
 
@@ -269,7 +304,7 @@
 
 **Acceptance:** Board metadata is the durable bridge from the per-profile Project registry to the global Kanban queue, while worker compatibility is decided by access to the bound path rather than duplicate Project state.
 
-### Task 9: Materialize Project-bound workspaces in the assigned worker environment
+### Task 10: Materialize Project-bound workspaces in the assigned worker environment
 
 **Objective:** Ensure the exact environment used by the assignee validates and creates its Project worktree instead of handing a backend path to controller-local `Path`, Git, or `Popen(cwd=...)`.
 
@@ -299,32 +334,78 @@
 
 **Acceptance:** The global dispatcher may be hosted by any profile, but Project-bound workspace creation and use are authoritative in the assignee's terminal environment; every successful worker therefore satisfies the shared-backend assumption.
 
-### Task 10: Reconcile Desktop optimistic state with backend truth
+### Task 11: Make Desktop Project path entry profile-filesystem-aware
 
-**Objective:** Avoid temporarily retaining the raw path when the backend returns a different canonical path.
+**Objective:** Preserve picker UX only when the selected profile actually shares the browsed filesystem; use explicit remote-path entry otherwise, and reconcile every mutation from backend truth.
 
 **Files:**
 
+- Modify: `apps/desktop/src/types/hermes.ts`
 - Modify: `apps/desktop/src/store/projects.ts`
+- Modify: `apps/desktop/src/lib/desktop-fs.ts`
+- Modify: `apps/desktop/src/app/chat/sidebar/project-dialog.tsx`
+- Modify: `apps/desktop/src/app/chat/sidebar/index.tsx` or the shared dialog host selected during implementation
+- Modify: `apps/desktop/src/i18n/types.ts`
+- Modify: `apps/desktop/src/i18n/{en,zh,zh-hant,ja,ru,ar}.ts`
 - Test: `apps/desktop/src/store/projects.test.ts`
+- Test: `apps/desktop/src/app/chat/sidebar/project-dialog.test.tsx`
+- Add/Test if required by the shared entry flow: `apps/desktop/src/app/chat/sidebar/project-path-dialog.tsx` and its test
 
 **Steps:**
 
-1. Change `addProjectFolder` to consume the existing `{ project: ProjectInfo }` RPC response.
-2. Keep the current optimistic update and rollback behavior while the request is pending.
-3. On success, replace the affected cached Project and tree primary path with the backend-returned canonical values before launching background reconciliation.
-4. Keep stale-backend detection, profile capture, and reconnect generation guards unchanged.
-5. Add one Vitest case where input `../repo` returns `/workspace/repo`; assert the final project folder and primary tree path use `/workspace/repo`. Keep the existing rejection rollback behavior as the failure check.
+1. Model three renderer-side entry modes from two independent facts:
+   - `filesystem_local && local Desktop connection`: existing native Electron system picker;
+   - `filesystem_local && remote Desktop connection`: existing in-app picker backed by the gateway host `/api/fs`;
+   - `!filesystem_local` or unknown/loading capability: plain path text entry.
+2. Keep connection locality in `desktop-fs.ts` limited to selecting native versus gateway-host browsing. It must no longer answer whether the active profile's terminal backend owns that filesystem.
+3. Load the Task 6 capability for the exact captured gateway/profile when Project UI opens. Disable any browse action while capability is unresolved, and use text mode if lookup fails or the backend predates the capability RPC. Never infer from `local`/`docker`/`ssh` strings.
+4. In `ProjectDialog`, retain the existing browse-and-list workflow for filesystem-local profiles. For non-local profiles, render an unnormalized path input plus explicit Add action (Enter is equivalent); support `~`, relative, POSIX, and provider-defined syntax without host-side `path` helpers. Do not derive the Project name with controller-platform basename rules; retain/use the dialog's explicit name field. Creating a Project batches the entered folders and validates all of them atomically only on the final `projects.create` submission; add-folder mode validates on `projects.add_folder` submission.
+5. Route `openFolderAsProject()` through the same shared path-acquisition policy. This covers sidebar actions, menu integrations, keybindings, and command-palette entrypoints that currently bypass `ProjectDialog`; a non-local profile must receive a reusable path prompt instead of opening either filesystem picker.
+6. Do not call the gateway-host `/api/fs` list/default-cwd endpoints for a terminal-non-local profile. They describe the gateway filesystem, not the configured terminal environment.
+7. Keep the raw input visible and the dialog open while the RPC is pending and after a validation error. Surface the backend's profile-scoped resolution error inline, preserve the user's text for correction, prevent duplicate submit, and provide accessible labels/focus behavior for the new field.
+8. Change `addProjectFolder` and create/open flows to consume the existing authoritative `{project: ProjectInfo}` RPC response. On success, replace optimistic/raw cache entries, active Project state, and tree primary path with backend-returned canonical values before background reconciliation.
+9. Preserve stale-backend detection, captured-profile routing, reconnect-generation guards, and rollback behavior. A profile/gateway change while a dialog is open clears or closes the pending request rather than submitting the path under a different environment.
+10. Add Vitest cases for all three entry modes, capability loading/failure, non-local paths never invoking native or `/api/fs` pickers, every `openFolderAsProject` entrypoint using text mode, raw `../repo` submitted unchanged, canonical `/workspace/repo` replacing it on success, error text/input retention on rejection, duplicate-submit prevention, and profile-switch capability invalidation.
+11. Add localized labels, placeholders, explanation, validation-pending copy, and backend-error affordances to every shipped Desktop locale; keep backend names out of user-facing copy.
 
-**Acceptance:** The renderer remains responsive but never treats its raw input as authoritative after the RPC succeeds.
+**Acceptance:** A Desktop user can only browse a filesystem proven to be the active profile's terminal filesystem; non-local Project paths are entered as text, validated by the mutation RPC, and replaced with the server-returned canonical path.
 
-### Task 11: Document user-visible semantics
+### Task 12: Align the Web/Kanban dashboard with backend-owned Project paths
+
+**Objective:** Keep browser path entry explicit and move every Board/Project-directory validation off the web-server host and into the active profile's terminal environment.
+
+**Files:**
+
+- Modify: `plugins/kanban/dashboard/plugin_api.py`
+- Modify: `plugins/kanban/dashboard/dist/index.js`
+- Modify: `web/src/i18n/types.ts`
+- Modify: `web/src/i18n/{en,af,ar,de,es,fr,ga,hu,it,ja,ko,pt,ru,tr,uk,zh,zh-hant}.ts`
+- Test: `tests/plugins/test_kanban_board_project_api.py`
+- Verify/no standalone Project CRUD change: `web/src/pages/Chat.tsx` and the Web route inventory
+
+**Steps:**
+
+1. Record the audited scope in implementation notes/tests: the React Web dashboard currently has no standalone Project-management page; `/chat` embeds the TUI. Do not add a speculative second Project store or browser file picker. The structured Web surface affected here is the Kanban dashboard's Board create/settings Project-directory field.
+2. Keep that field as text for both local and non-local server filesystems: a browser cannot safely open a system picker for the gateway or terminal backend. Update its helper copy to state that the path is resolved in the active profile's terminal environment when saved.
+3. Replace `plugin_api.py:_validate_workdir` controller-only handling with the shared backend-aware resolver and a `require_absolute_existing_directory` policy. Preserve the current strict local Board-workdir behavior; for non-local filesystems perform the equivalent absolute/directory/canonical checks in the terminal environment. Do not duplicate shell quoting, provider lookup, or backend classification in the plugin.
+4. Resolve direct `default_workdir` input before Board metadata mutation. A selected `project_id` uses the Project's already-canonical primary path and verifies access through the same profile environment before binding. If both are supplied, preserve the existing explicit-workdir precedence but validate the effective path exactly once.
+5. Return the canonical effective `default_workdir` in create/update responses. The dashboard replaces local form state and refreshed Board metadata from that response; it must not keep the raw entry after success.
+6. On failure, return a stable HTTP 400 validation error without writing partial Board metadata. Keep the create/settings dialog open, preserve the entered path, render the server message beside the field, restore focus, and prevent duplicate submissions while resolution is pending.
+7. Bind resolution to the dashboard server/request profile that owns the Project lookup; never infer compatibility from the Board creator, task assignee, or backend name. Worker-side accessibility remains the Task 9/10 invariant and is rechecked when an assignee materializes a task.
+8. Add API tests for local compatibility, plugin-remote canonicalization, missing/file/unreachable path rejection, Project binding, explicit-workdir precedence, no partial write, and controller `Path` probes being forbidden for remote paths. Add dashboard behavior coverage at the existing feasible JS test layer; if the checked-in plugin has no source test harness, exercise the HTTP contract in Python and document the manual create/settings UI smoke test rather than inventing a parallel build system.
+9. Add/update Kanban translation keys for helper, pending, and validation-error text in every shipped Web locale; do not rely on English fallbacks for new permanent UI.
+
+**Acceptance:** The Web/Kanban dashboard never validates a backend-owned directory against the web-server host, reports terminal-environment failures without losing input, and persists/displays the canonical backend path returned by the server.
+
+### Task 13: Document user-visible semantics
 
 **Objective:** Make the command behavior and failure boundary explicit.
 
 **Files:**
 
 - Modify: `website/docs/reference/cli-commands.md`
+- Modify: `website/docs/user-guide/desktop.md`
+- Modify: `website/docs/user-guide/features/kanban.md`
 
 **Steps:**
 
@@ -334,7 +415,9 @@
 4. State that a non-local resolution failure rejects the command without changing the Project.
 5. Document the binding contract: a Board bound to a Project uses the Project's canonical backend path, and every assignee profile must be configured to access the same durable/shared filesystem.
 6. Document dispatch failure when an assignee cannot access or canonicalize the bound path; do not imply that matching backend names are required or sufficient.
-7. Keep wording provider-neutral; do not enumerate built-in backends.
+7. Document Desktop's locality-aware path entry: native/gateway picker only when the profile's terminal filesystem matches it, otherwise remote path text input followed by server validation.
+8. Document that the Web/Kanban dashboard accepts a path string and resolves it in the dashboard profile's terminal environment rather than the browser or web-server host.
+9. Keep wording provider-neutral; do not enumerate built-in backends.
 
 ---
 
@@ -343,12 +426,17 @@
 - **Local CLI:** relative, `~`, missing path, regular file, duplicate add, label update, and `--primary` retain current behavior.
 - **Remote CLI:** relative/`~` path resolves through fake provider; missing/file path fails; canonical path is stored; failure returns 2 and leaves DB unchanged.
 - **Remote RPC:** requested profile selects its own terminal policy/provider/credentials and writes only its own DB; failure returns JSON-RPC 5063.
+- **Capability RPC:** filesystem locality is additive, provider-derived, profile-scoped, and conservative for unknown/older providers; querying it does not create a sandbox.
 - **Agent tool:** uses its task/session environment and returns canonical `primary_path`; path-resolution failure returns `success: false` before creation/activation, and workspace-application failure is never reported as a successful move.
 - **Plugin provider:** a provider name unknown to core is correctly classified through environment/provider capabilities.
 - **Reference operations:** canonical stored paths can be set primary or removed; a deleted remote folder can still be removed by its exact stored path.
 - **RPC scheduling:** every potentially remote Project mutation is dispatched through `_LONG_HANDLERS` and does not block the JSON-RPC reader.
 - **Downstream consumption:** a remote-only folder can become the intended session cwd and match back to its Project with controller-local filesystem probes forbidden.
-- **Desktop:** optimistic raw path is replaced by authoritative canonical path; rejected RPC rolls state back.
+- **Desktop local connection + local filesystem:** native picker remains in use and local Project semantics are unchanged.
+- **Desktop remote connection + local filesystem:** the gateway-host browser remains in use because it addresses the same filesystem as the active profile.
+- **Desktop non-local/unknown filesystem:** create, add-folder, and open-folder entrypoints show text input and never call native or gateway-host filesystem pickers; raw input is replaced by authoritative canonical response, while rejected input remains editable.
+- **Desktop profile switch:** cached locality and pending path operations cannot cross gateway/profile generations.
+- **Web/Kanban dashboard:** create/settings text input persists the canonical terminal-environment result, shows backend validation failures without closing, and performs no controller `Path` probe for remote paths.
 - **Cross-platform:** remote POSIX canonical paths are never fed into host-native `abspath`/`normcase` after resolution.
 - **Bound Board inheritance:** a profile-A Project binding gives new Board tasks a self-contained canonical root/project slug without requiring the assignee profile to own the same Project row.
 - **Shared backend success:** profile B reaches profile A's canonical root in its own environment, materializes the deterministic worktree there, and runs with that worktree as authoritative cwd.
@@ -371,9 +459,15 @@ scripts/run_tests.sh \
   tests/plugins/test_kanban_board_project_api.py
 
 cd apps/desktop
-npm test -- --run src/store/projects.test.ts
+npm test -- --run \
+  src/store/projects.test.ts \
+  src/app/chat/sidebar/project-dialog.test.tsx
 npm run typecheck
 npm run lint
+
+cd ../../web
+npm run check
+npm run build
 ```
 
 ### Final gates
