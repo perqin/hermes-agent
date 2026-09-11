@@ -1,0 +1,363 @@
+# Backend-aware Project Folder Resolution Implementation Plan
+
+> **For Hermes:** Implement this plan task-by-task, keeping each commit scoped and preserving the local-backend contract.
+
+**Goal:** Make Project folder paths canonical in the filesystem namespace that will consume them: preserve the current local behavior, but resolve and validate paths inside non-local terminal environments before writing them to the per-profile Projects database.
+
+**Architecture:** Add one Project path resolver above `projects_db`. It acquires the configured terminal environment through the existing terminal runtime/factory, classifies filesystem locality from the environment capability (`env.is_local`) rather than a backend-name list, and either applies the existing host-local normalization or performs a bounded backend-side `cd` + `pwd -P`. All externally reachable Project folder mutations use this resolver before entering a database transaction; `projects_db` receives an explicit “already canonical” signal so a controller OS cannot reinterpret a remote path.
+
+**Tech stack:** Python, argparse, SQLite, terminal `BaseEnvironment`/plugin providers, TUI/Desktop JSON-RPC, React/TypeScript nanostores, pytest, Vitest.
+
+---
+
+## 1. Scope and invariants
+
+### In scope
+
+- `hermes project create ... <folders>` and `--primary PATH`.
+- `hermes project add-folder <project> <path>`.
+- `hermes project remove-folder` and `set-primary`, so a canonical remote path can later be referenced without being reinterpreted by the controller OS.
+- `projects.create`, `projects.add_folder`, `projects.remove_folder`, and `projects.set_primary` JSON-RPC methods used by Desktop/TUI/dashboard.
+- The `desktop_project` agent tool's `create` action.
+- Profile-correct terminal configuration, credentials, environment cache identity, and error propagation for project RPCs.
+- Immediate Desktop reconciliation to the canonical path returned by the backend.
+- Project ownership/session-workspace consumers that would otherwise reinterpret or reject the newly canonical remote path on the controller host.
+
+### Required behavior
+
+1. **Local filesystem:** preserve `_normalize_path` semantics exactly: trim, host `expanduser`, host `abspath`, remove trailing separators. Do not add existence, directory, accessibility, repository, or symlink checks. In particular, local missing paths and regular files remain accepted; quoted-empty behavior must be characterized before deciding whether to change it separately.
+2. **Non-local filesystem:** resolve on the selected environment, never with controller-side `Path`, `os.path.abspath`, `expanduser`, `exists`, or `isdir`.
+3. **Classification:** use the acquired environment's locality capability. `env.is_local is True` is local; false or absent is treated as non-local. Project code must not contain a backend-name enum or `if backend == ...` ladder.
+4. **Resolution:** run a shell-safe, bounded equivalent of `(cd -- <raw-path> && pwd -P)` through `env.execute()`. Persist only the single absolute physical path returned by the backend.
+5. **Failure:** environment creation failure, timeout, non-zero command result, missing/ambiguous output, or non-absolute output raises a sanitized `ValueError` before any Project database write.
+6. **Atomic create:** resolve every supplied folder and primary path first; if any one fails, create no project and write no folder rows.
+7. **No session-cwd side effect:** resolving a folder must not adopt it as the caller's durable terminal cwd. Use an internal environment operation, not the model-facing `terminal_tool()` result/finalizer, and keep the probe in a subshell or otherwise avoid recording cwd state.
+8. **Profile isolation:** a Project RPC targeting profile B must use B's `HERMES_HOME`, terminal policy, terminal-provider registration scope, and credential/secret scope. It must not reuse profile A's cached SSH/container/plugin environment.
+9. **Existing rows:** no schema migration and no eager rewriting. Previously stored paths remain byte-preserved until the user explicitly mutates them.
+10. **Compatibility:** labels, primary-folder promotion/demotion, duplicate `INSERT OR IGNORE`, active-project behavior, archived-project behavior, and RPC method/result shapes stay unchanged.
+11. **RPC responsiveness:** every Project mutation that may initialize or execute against a remote environment runs through the existing long-handler executor rather than blocking the JSON-RPC reader thread.
+12. **Canonical-path consumption:** once a remote path has been validated, session/project ownership code must compare and propagate it without controller-side `isdir`, `abspath`, `normcase`, or `os.sep` assumptions.
+
+### Non-goals
+
+- Persisting backend names, sandbox IDs, mount mappings, or provider descriptors in `projects.db`.
+- Migrating a Project automatically when `terminal.backend` changes.
+- Requiring a Project folder to be a Git repository.
+- Adding a Project-specific terminal backend manager or duplicating terminal configuration/factory logic.
+- Changing repository discovery or making local Project creation stricter.
+- Implementing remote Project-linked Kanban worktree materialization. The current Kanban dispatcher creates directories, runs Git, and starts workers on the controller host; that needs a separate execution-transport design rather than being implied by correct folder storage.
+
+---
+
+## 2. Current seams to preserve and reuse
+
+- CLI parser and dispatch: `hermes_cli/projects_cmd.py:12-75`; folder handlers at `:133-190`.
+- Per-profile persistence and current host normalization: `hermes_cli/projects_db.py:23-25`, `:108-111`, `:227-263`, `:312-366`.
+- Environment capability: `tools/environments/base.py:142-169`; only `LocalEnvironment` sets `is_local = True` at `tools/environments/local.py:689-694`.
+- Unified execution result: `BaseEnvironment.execute()` returns `output`/`returncode` at `tools/environments/base.py:475-565`; its wrapper already emits physical `pwd -P` cwd markers via `tools/environments/base_session_env.py:43-46`.
+- Canonical environment creation/cache lifecycle: `_plan_execution`, `_acquire_env`, and `_create_configured_env` in `tools/terminal_tool.py:895-1047` and `tools/terminal_tool_lifecycle.py:66-81`.
+- Plugin environment creation and provider capability metadata: `tools/terminal_tool_backends.py:183-220` and `agent/terminal_env_provider.py:20-103`.
+- Profile-scoped Project RPCs: `tui_gateway/methods_projects.py:27-99`; current generic wrapper only binds `HERMES_HOME` in `tui_gateway/server.py:494-523`.
+- Project mutation RPCs are not currently in `_LONG_HANDLERS` (`tui_gateway/server.py:151-177`), although environment creation and `env.execute()` are synchronous and may cold-start SSH/cloud/container runtimes.
+- Agent Project creation: `tools/project_tools.py:81-106` currently performs host-side `abspath`/`expanduser` itself.
+- The Project workspace callback still performs controller-side `abspath`/`isdir` and silently returns for remote-only paths (`tui_gateway/agent_callbacks.py:129-155`); `tools/project_tools.py:33-39` also swallows callback failures.
+- Project ownership still normalizes with controller `os.path`/`os.sep` in `hermes_cli/projects_db.py:469-484`; the pure path-style-aware comparison model already exists in `tui_gateway/project_tree.py:54-73` and should be moved/reused at a lower layer rather than imported upward from the gateway.
+- Desktop create/add-folder cache updates: `apps/desktop/src/store/projects.ts:873-953` and `:1029-1070`.
+
+---
+
+## 3. Implementation tasks
+
+### Task 1: Expose a strict internal terminal-environment acquisition seam
+
+**Objective:** Let non-tool code obtain the same configured/cached environment used by terminal and file tools without executing a model-facing command or inspecting backend names.
+
+**Files:**
+
+- Modify: `tools/terminal_tool.py`
+- Modify if factoring is needed: `tools/terminal_tool_lifecycle.py`
+- Modify: `agent/terminal_env_provider.py`
+- Modify: `tools/terminal_tool_backends.py`
+- Test: `tests/tools/test_terminal_tool.py` or the nearest existing environment-lifecycle test file
+- Test: `tests/agent/test_terminal_env_registry.py`
+
+**Steps:**
+
+1. Extract or expose an internal `acquire_terminal_environment(...)` operation around the existing planning/cache path. It must reuse `_get_env_config`, `_select_image`, `_resolve_task_host_cwd`, `_create_configured_env`, creation locks, `_active_environments`, activity timestamps, and cleanup registration rather than creating a second cache.
+2. Accept the real session `task_id` when available. Also accept an explicit operation/cache scope for sessionless Project RPCs, so two profiles in one TUI/Desktop backend cannot collapse onto the same `default` remote environment.
+3. Keep failures strict for this API. Unlike `ensure_task_env()`, do not return `None` for both “local” and “remote creation failed,” and do not swallow creation errors. Convert internal `_Rejected`/connection/provider failures into a caller-consumable exception with redacted text.
+4. Return the environment object itself; the Project layer reads `getattr(env, "is_local", False)`. Do not return or expose a hard-coded backend classification.
+5. Clarify in `TerminalEnvironmentProvider.create_environment()` documentation that returned environments participate in the `is_local` capability contract. Preserve an environment's explicit value; for duck-typed plugin environments that omit it, stamp a value derived from the provider's existing `is_remote` capability, with failures defaulting safely to non-local.
+6. Add one contract test covering a plugin backend not named in core: acquisition returns its environment, its remote/local classification comes from provider/environment capability, and no backend enumeration is required.
+
+**Acceptance:** A local built-in, a non-local built-in-shaped fake, and a plugin provider can all be acquired through one API; remote acquisition errors are distinguishable from local selection; profile-qualified operation scopes do not share cached environments accidentally.
+
+### Task 2: Add the single Project folder resolver
+
+**Objective:** Centralize local compatibility and backend-owned remote canonicalization.
+
+**Files:**
+
+- Create: `hermes_cli/project_paths.py`
+- Test: `tests/hermes_cli/test_project_paths.py`
+
+**Steps:**
+
+1. Move or expose the current local lexical normalization without changing its behavior. Keep it as the only local branch.
+2. Implement `resolve_project_folder(path, *, task_id=None, operation_scope=None)`:
+   - acquire the configured terminal environment through Task 1;
+   - if `env.is_local is True`, return the existing local normalization result without executing or statting the path;
+   - otherwise execute a backend-side, shell-safe subshell equivalent of `(builtin cd -- <path> && pwd -P)` so the shared environment's cwd is not changed;
+   - preserve backend-side `~` expansion without allowing command injection;
+   - use a bounded timeout and disable compound-background rewriting for this internal probe;
+   - frame the result with a unique marker so login-shell/banner noise cannot be mistaken for the path;
+   - require the environment's `returncode` to be zero and exactly one usable absolute marked result; do not depend on `result["cwd"]`, because duck-typed/managed providers only guarantee `output` and `returncode`;
+   - never feed the result back through controller `os.path` APIs.
+3. Add a batch helper for Project creation. Deduplicate by the resolved canonical strings, ensure `primary_path` is resolved only once, and return all results only after every path succeeds.
+4. Add a reference resolver for `remove-folder`/`set-primary`:
+   - first accept an exact path already stored on the project, allowing removal of a directory that has since been deleted;
+   - otherwise apply local normalization or remote resolution and match the resulting canonical path;
+   - never make stale remote folders impossible to remove.
+5. Raise stable, sanitized `ValueError` messages that identify the input path and whether resolution failed, but do not expose provider exception text, credentials, shell snapshots, or arbitrary remote stderr.
+6. Write two behavior-focused tests rather than source-shape tests:
+   - a table-driven local/remote resolver contract covering relative path, `~`, dot segments, trailing separators, missing directory, regular file, and a shell-metacharacter path;
+   - a failure/atomicity contract covering environment failure, timeout/non-zero result, malformed output, and exact removal of a stale stored remote path.
+
+**Acceptance:** Local results and permissiveness are unchanged. Remote aliases resolve to the backend's physical absolute path, invalid directories fail, and no remote input is interpreted by the controller OS.
+
+### Task 3: Make the database boundary explicit about canonical paths
+
+**Objective:** Prevent `projects_db` from re-normalizing a remote POSIX path with the controller's OS rules while preserving existing direct/local callers.
+
+**Files:**
+
+- Modify: `hermes_cli/projects_db.py`
+- Test: `tests/hermes_cli/test_projects_db.py`
+
+**Steps:**
+
+1. Add an explicit keyword contract such as `canonical_paths=False` to path-bearing persistence methods (`create_project`, `add_folder`, `remove_folder`, `set_primary`, and `find_by_primary_path`). Default false retains the existing host-local normalization for callers not yet migrated.
+2. When canonical is true, perform only storage-level validation: string/non-empty shape and root-safe trailing-separator cleanup. Do not run `abspath`, `expanduser`, `realpath`, `normcase`, existence checks, or platform-native path parsing.
+3. Keep the schema unchanged. Continue using `(project_id, path)` as the folder primary key and preserve `INSERT OR IGNORE`, label updates, first-folder primary selection, and explicit primary promotion.
+4. Compare canonical remote primary paths exactly. Keep local case/separator equivalence in the local resolver/comparison path rather than applying host `normcase` to remote strings.
+5. Move the path-style-aware segment/key logic currently embedded in `tui_gateway/project_tree.py` into a dependency-safe Project path utility and reuse it from both tree building and `project_for_path()`. Canonical POSIX and Windows-shaped paths must be compared according to their own syntax rather than the controller's `os.sep`/`normcase`.
+6. Ensure Project creation receives a completely resolved set before opening `write_txn`, so no partial project or folder row survives a failed batch.
+7. Add one cross-platform-oriented database test showing that a canonical POSIX remote path is stored byte-for-byte, remains matchable by `project_for_path`, and is not prefixed/reformatted by the host OS. Keep existing local normalization and duplicate-primary tests green.
+
+**Acceptance:** The DB remains backend-agnostic, but callers can prove a path is already canonical and avoid host reinterpretation; no migration is required.
+
+### Task 4: Route every CLI folder mutation through the resolver
+
+**Objective:** Make `hermes project` honor the selected terminal filesystem while retaining existing exit-code/error conventions.
+
+**Files:**
+
+- Modify: `hermes_cli/projects_cmd.py`
+- Test: `tests/hermes_cli/test_projects_cli.py`
+
+**Steps:**
+
+1. Resolve all `create` folders and `--primary` before calling `pdb.create_project(..., canonical_paths=True)`.
+2. Resolve `add-folder` before `pdb.add_folder(..., canonical_paths=True)`.
+3. For `remove-folder` and `set-primary`, use the exact-first reference policy from Task 2, then pass the canonical path to the DB.
+4. Keep `_db_command`'s `ValueError` mapping: print `project: <message>` and return exit code 2. Project-not-found behavior remains exit code 1.
+5. Print the canonical stored path in success output, not the raw input spelling.
+6. Add one CLI integration test using a fake non-local environment: a relative path becomes the fake backend's absolute path; a failed `cd` exits 2 and leaves the project unchanged. Existing local create/list/show behavior remains the regression check.
+
+**Acceptance:** The real argparse-to-DB command path is exercised, and a failed remote resolution produces no database mutation.
+
+### Task 5: Make Project JSON-RPC mutations profile- and environment-correct
+
+**Objective:** Apply the same resolver to Desktop/TUI/dashboard without crossing profile or environment identities.
+
+**Files:**
+
+- Modify: `tui_gateway/methods_projects.py`
+- Modify: `tui_gateway/server.py`
+- Test: `tests/tui_gateway/test_projects_rpc.py`
+
+**Steps:**
+
+1. Wrap path-bearing Project mutators in a bounded Project runtime scope that includes:
+   - the existing requested-profile `HERMES_HOME` override;
+   - that profile's secret scope for provider/SSH credentials;
+   - that profile's complete terminal policy via `install_profile_terminal_scope`;
+   - a deterministic profile-qualified operation scope for terminal environment caching.
+2. Keep this scope narrow to Project mutations unless a generic full profile-runtime helper already exists. Do not silently change unrelated read-only RPC behavior.
+3. Resolve `projects.create` and `projects.add_folder` before database writes; apply the exact-first reference policy to remove/set-primary.
+4. Continue returning the refreshed Project object. Preserve JSON-RPC error code `5063` for `ValueError`; do not collapse resolution failures into generic `5061`.
+5. Add `projects.create`, `projects.add_folder`, `projects.remove_folder`, and `projects.set_primary` to `_LONG_HANDLERS`. Even exact-reference operations are cheap, but keeping all path-bearing mutators on the same dispatch class prevents a future resolver fallback from blocking the reader thread.
+6. Add one integration test with launch profile A and requested profile B selecting different fake terminal providers. Assert B's provider executes, B's canonical path lands only in B's `projects.db`, A's environment/DB are untouched, the next unscoped request still uses A, and the four mutators are registered as long handlers.
+
+**Acceptance:** A multiplexed backend cannot validate a profile-B path against profile A's host, credentials, policy, or cached environment.
+
+### Task 6: Remove host normalization from the agent Project tool
+
+**Objective:** Keep model-driven Project creation consistent with CLI and RPC paths.
+
+**Files:**
+
+- Modify: `tools/project_tools.py`
+- Modify: `tui_gateway/agent_callbacks.py`
+- Test: extend the nearest behavioral Project-tool/callback tests; do not add a source-reading test
+
+**Steps:**
+
+1. Remove the direct `os.path.abspath(os.path.expanduser(...))` in `project_create`.
+2. Pass the tool call's real `task_id` to the shared Project resolver so it reuses the session's configured environment and isolation.
+3. Perform duplicate-primary lookup using the canonical resolved path, then create with `canonical_paths=True`.
+4. Make the workspace callback consume the already validated canonical path. Keep the existing `abspath` + `isdir` guard only when that session's actual environment is local; a non-local environment must not stat the path on the controller host.
+5. Stop swallowing authoritative workspace callback failures in `_apply_workspace`. Convert them into the tool's existing `success: false` envelope; do not report that the chat moved when it did not. A background task with no provable live GUI session may still create the Project, but must not borrow or move another session by profile guesswork.
+6. Preserve the current JSON success/error shape. On success the workspace callback must receive the canonical backend path and the matching task/session identity.
+7. Add one behavior test proving a fake non-local session resolves a relative path remotely and moves to that canonical path without host `isdir`; resolution/callback failure must not falsely report a successful workspace move.
+
+**Acceptance:** CLI, RPC, and agent-tool creation persist the same path for the same profile/environment/input.
+
+### Task 7: Remove controller-local assumptions from Project path consumers
+
+**Objective:** Ensure a correctly stored remote folder remains usable for project ownership and session cwd propagation.
+
+**Files:**
+
+- Modify: `hermes_cli/projects_db.py`
+- Modify: `tui_gateway/project_tree.py`
+- Modify as required by the exact call chain: `agent/runtime_cwd.py`
+- Preserve unless a regression test proves otherwise: `tui_gateway/session_workdir.py`
+- Test: `tests/hermes_cli/test_projects_db.py`
+- Test: `tests/agent/test_runtime_cwd.py`
+- Test: the nearest `tui_gateway` session-cwd/project callback test file
+
+**Steps:**
+
+1. Reuse the path-style-aware comparison utility from Task 3 in `project_for_path`; do not normalize a canonical remote cwd through the controller OS.
+2. Audit the Project-created/switch workspace chain for controller `Path.expanduser`, `Path.is_dir`, `os.path.abspath`, and `os.path.isdir` checks. Local environments keep those checks; non-local environments trust only paths already validated by the Project resolver or validate through that environment.
+3. Keep `tui_gateway/session_workdir.py`'s existing precedence where an explicit remote session cwd wins over the global configured cwd. Do not redesign or weaken this working rule.
+4. Ensure `projects.for_cwd`, session status, sidebar grouping, and `_project_info_for_cwd` can match a remote canonical cwd without probing the controller filesystem.
+5. Add one end-to-end invariant test: a remote-only canonical folder can be stored, adopted as the intended session cwd, and matched back to its Project while every controller-local existence probe is set to fail if called.
+
+**Acceptance:** Correct remote storage is not undone by a later host-local check, and local deleted-cwd healing remains unchanged.
+
+### Task 8: Reconcile Desktop optimistic state with backend truth
+
+**Objective:** Avoid temporarily retaining the raw path when the backend returns a different canonical path.
+
+**Files:**
+
+- Modify: `apps/desktop/src/store/projects.ts`
+- Test: `apps/desktop/src/store/projects.test.ts`
+
+**Steps:**
+
+1. Change `addProjectFolder` to consume the existing `{ project: ProjectInfo }` RPC response.
+2. Keep the current optimistic update and rollback behavior while the request is pending.
+3. On success, replace the affected cached Project and tree primary path with the backend-returned canonical values before launching background reconciliation.
+4. Keep stale-backend detection, profile capture, and reconnect generation guards unchanged.
+5. Add one Vitest case where input `../repo` returns `/workspace/repo`; assert the final project folder and primary tree path use `/workspace/repo`. Keep the existing rejection rollback behavior as the failure check.
+
+**Acceptance:** The renderer remains responsive but never treats its raw input as authoritative after the RPC succeeds.
+
+### Task 9: Document user-visible semantics
+
+**Objective:** Make the command behavior and failure boundary explicit.
+
+**Files:**
+
+- Modify: `website/docs/reference/cli-commands.md`
+
+**Steps:**
+
+1. Document `project create` folder arguments and `project add-folder` options.
+2. State that local backends keep lexical local normalization and do not require existence.
+3. State that non-local terminal environments resolve and validate the folder in that environment and store the returned absolute physical path.
+4. State that a non-local resolution failure rejects the command without changing the Project.
+5. Keep wording provider-neutral; do not enumerate built-in backends.
+
+---
+
+## 4. Verification matrix
+
+- **Local CLI:** relative, `~`, missing path, regular file, duplicate add, label update, and `--primary` retain current behavior.
+- **Remote CLI:** relative/`~` path resolves through fake provider; missing/file path fails; canonical path is stored; failure returns 2 and leaves DB unchanged.
+- **Remote RPC:** requested profile selects its own terminal policy/provider/credentials and writes only its own DB; failure returns JSON-RPC 5063.
+- **Agent tool:** uses its task/session environment and returns canonical `primary_path`; path-resolution failure returns `success: false` before creation/activation, and workspace-application failure is never reported as a successful move.
+- **Plugin provider:** a provider name unknown to core is correctly classified through environment/provider capabilities.
+- **Reference operations:** canonical stored paths can be set primary or removed; a deleted remote folder can still be removed by its exact stored path.
+- **RPC scheduling:** every potentially remote Project mutation is dispatched through `_LONG_HANDLERS` and does not block the JSON-RPC reader.
+- **Downstream consumption:** a remote-only folder can become the intended session cwd and match back to its Project with controller-local filesystem probes forbidden.
+- **Desktop:** optimistic raw path is replaced by authoritative canonical path; rejected RPC rolls state back.
+- **Cross-platform:** remote POSIX canonical paths are never fed into host-native `abspath`/`normcase` after resolution.
+- **Kanban boundary:** existing local Project-linked worktrees remain unchanged; remote worktree materialization is not claimed by this change and is tracked as a separate transport-level implementation.
+
+### Targeted commands
+
+```bash
+scripts/run_tests.sh \
+  tests/agent/test_terminal_env_registry.py \
+  tests/hermes_cli/test_project_paths.py \
+  tests/hermes_cli/test_projects_db.py \
+  tests/hermes_cli/test_projects_cli.py \
+  tests/tui_gateway/test_projects_rpc.py \
+  tests/tools/test_desktop_tools_diet.py \
+  tests/agent/test_runtime_cwd.py
+
+cd apps/desktop
+npm test -- --run src/store/projects.test.ts
+npm run typecheck
+npm run lint
+```
+
+### Final gates
+
+```bash
+scripts/check_compat_pointers.py
+scripts/run_tests.sh
+git diff --check
+```
+
+Do not run `uv build --wheel`; this change does not require package artifacts.
+
+---
+
+## 5. Risks and mitigations
+
+1. **Controller OS corrupts remote path:** require the explicit canonical-path DB contract and prohibit host path APIs after remote resolution.
+2. **Shell injection/path quoting:** do not concatenate raw input into an unquoted command. Reuse the environment's cwd quoting rules or a shared quoting helper, run in a subshell, and test metacharacters.
+3. **Probe changes terminal cwd:** bypass model-facing terminal finalization/session-cwd recording; assert the session cwd is unchanged after resolution.
+4. **Cross-profile environment reuse:** bind full requested-profile runtime state and use a profile-qualified operation cache scope; assert A/B isolation.
+5. **Plugin compatibility:** treat absent `is_local` as non-local and derive/stamp it from existing provider capability where possible; never assume an unknown plugin is host-local.
+6. **Resource churn:** acquire through the existing environment cache/reaper instead of creating and immediately destroying ad hoc SSH/container environments.
+7. **Removing deleted paths:** exact stored-path matching precedes backend resolution for remove/set-primary references.
+8. **Partial project creation:** finish all remote probes before opening the database write transaction.
+9. **Existing bad rows:** leave them untouched; automatic migration cannot know which historical backend namespace produced them.
+10. **False end-to-end confidence:** explicitly test session ownership/workspace propagation after persistence; do not stop at a correct database row.
+11. **Kanban overclaim:** do not route controller-side `Path`/Git/Popen work at a remote path as part of this patch. Record remote Project-linked Kanban worktree support as a follow-up requiring backend execution and worker transport changes.
+
+## 6. Expected change set
+
+**New module:**
+
+- `hermes_cli/project_paths.py`
+- `tests/hermes_cli/test_project_paths.py`
+
+**Core modifications:**
+
+- `tools/terminal_tool.py`
+- `tools/terminal_tool_lifecycle.py` if acquisition logic is factored there
+- `tools/terminal_tool_backends.py`
+- `agent/terminal_env_provider.py`
+- `hermes_cli/projects_db.py`
+- `hermes_cli/projects_cmd.py`
+- `tui_gateway/methods_projects.py`
+- `tui_gateway/server.py`
+- `tui_gateway/project_tree.py`
+- `tui_gateway/agent_callbacks.py`
+- `agent/runtime_cwd.py` if the end-to-end regression reaches its host-only directory guard
+- `tools/project_tools.py`
+
+**Client/docs modifications:**
+
+- `apps/desktop/src/store/projects.ts`
+- `apps/desktop/src/store/projects.test.ts`
+- `website/docs/reference/cli-commands.md`
+
+No schema migration, backend enumeration, provider-specific branch, or generated artifact should be added.
