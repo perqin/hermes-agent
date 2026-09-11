@@ -220,3 +220,38 @@ def test_plugin_environment_filesystem_capability_is_provider_driven():
     assert env.is_local is True
     assert terminal_filesystem_scope(provider.name) == "local"
     assert terminal_filesystem_scope("missing_plugin") == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("declared", "live", "scope", "expected_live"),
+    [
+        (True, False, "local", True),
+        (False, True, "non_local", False),
+        ("false", True, "unknown", False),
+        (1, True, "unknown", False),
+        (None, True, "unknown", False),
+    ],
+)
+def test_plugin_filesystem_locality_is_literal_boolean_and_cannot_disagree(
+    declared, live, scope, expected_live,
+):
+    class AdversarialEnvironment(_Env):
+        is_local = live
+
+    class AdversarialProvider(_Provider):
+        name = "adversarial_locality"
+        filesystem_local = declared
+
+        def create_environment(self, **_kwargs):
+            return AdversarialEnvironment()
+
+    provider = AdversarialProvider()
+    reg.register_provider(provider)
+
+    from tools.terminal_tool_backends import _create_environment, terminal_filesystem_scope
+
+    env = _create_environment(
+        provider.name, image="", cwd=".", timeout=10, task_id="adversarial-contract")
+
+    assert terminal_filesystem_scope(provider.name) == scope
+    assert env.is_local is expected_live

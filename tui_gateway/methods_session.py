@@ -117,7 +117,9 @@ def _cwd_info(session: dict, cwd: str, branch=None) -> dict:
     """session.info after a cwd change: the full agent view, or the lazy shape."""
     if (agent := session.get("agent")) is not None:
         return _session_info(agent, session)
-    return {"cwd": cwd, "branch": git_probe.branch(cwd) if branch is None else branch,
+    return {"cwd": cwd, "branch": (
+                git_probe.branch(cwd) if branch is None and _session_filesystem_is_local(session)
+                else branch or ""),
             "project": _project_info_for_cwd(cwd), "lazy": True}
 
 
@@ -345,6 +347,7 @@ def _(rid, params: dict) -> dict:
             "active_session_lease": None,  # claimed lazily on the first turn (_ensure_active_session_slot)
             "cols": int(params.get("cols", 80)), "created_at": now, "edit_snapshots": {},
             "explicit_cwd": explicit_cwd,
+            "filesystem_local": _active_terminal_filesystem_is_local(),
             "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
             "seeded": bool(history),  # gates _persist_branch_seed: only create-time history is unpersisted
             "cwd": _completion_cwd(params), "inflight_turn": None, "last_active": now,
@@ -390,7 +393,8 @@ def _(rid, params: dict) -> dict:
         # Reflect the override now so the client doesn't clobber its sticky pick.
         "info": {"model": override.get("model") if override else _resolve_model(),
                  **({"provider": override["provider"]} if override.get("provider") else {}),
-                 "tools": {}, "skills": {}, "cwd": cwd, "branch": git_probe.branch(cwd),
+                 "tools": {}, "skills": {}, "cwd": cwd,
+                 "branch": git_probe.branch(cwd) if _session_filesystem_is_local(_sessions[sid]) else "",
                  "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                  "profile_name": _response_profile_name(profile)}})
 
@@ -727,8 +731,14 @@ def _resume_lazy(ctx: _Resume) -> dict:
         display = ctx.child_history(repair=False)
     except Exception:
         logger.debug("child-watch display projection read failed", exc_info=True)
-    return _resume_response(ctx, sid, record, info=_lazy_resume_info(cwd, profile=ctx.profile), display=display,
-                            count_source=display, running=running, status="streaming" if running else "idle")
+    return _resume_response(
+        ctx, sid, record,
+        info=_lazy_resume_info(
+            cwd, profile=ctx.profile, filesystem_local=record.get("filesystem_local"),
+        ),
+        display=display, count_source=display, running=running,
+        status="streaming" if running else "idle",
+    )
 
 
 def _resume_deferred(ctx: _Resume) -> dict:
@@ -873,6 +883,7 @@ def _(rid, params: dict, session: dict) -> dict:
 
 
 @method("session.workspace.move")
+@_profile_scoped
 def _(rid, params: dict) -> dict:
     """Re-home a STORED session's workspace (by ``session_key``; no live agent required). git branch/root are
     REPLACED (a stale ``git_repo_root`` kept the session under the project it left); a live agent follows even
@@ -881,15 +892,29 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4007, "session_key required")
     if not (raw := _str_param(params, "cwd")):
         return _err(rid, 4016, "cwd required")
-    from hermes_constants import translate_cwd_for_wsl_backend
-    resolved = os.path.abspath(os.path.expanduser(translate_cwd_for_wsl_backend(raw)))
-    if not os.path.isdir(resolved):
-        return _err(rid, 4017, f"working directory does not exist: {raw}")
     # Snapshot under the lock — concurrent RPCs mutate _sessions.
     with _sessions_lock:
         live_sid, live = next(
             ((sid, sess) for sid, sess in list(_sessions.items()) if sess.get("session_key") == target), ("", None))
-    branch, root = git_probe.branch(resolved), git_probe.common_repo_root(resolved)
+    try:
+        with _project_runtime_scope() as operation_scope:
+            filesystem_local = _active_terminal_filesystem_is_local()
+            if filesystem_local:
+                from hermes_constants import translate_cwd_for_wsl_backend
+                resolved = os.path.abspath(os.path.expanduser(translate_cwd_for_wsl_backend(raw)))
+                if not os.path.isdir(resolved):
+                    return _err(rid, 4017, f"working directory does not exist: {raw}")
+            else:
+                from hermes_cli.project_paths import resolve_project_folder
+                resolved = resolve_project_folder(raw, operation_scope=operation_scope)
+    except ValueError as exc:
+        return _err(rid, 4017, str(exc))
+    except Exception:
+        return _err(rid, 4017, "could not resolve working directory in terminal environment")
+    branch, root = (
+        (git_probe.branch(resolved), git_probe.common_repo_root(resolved))
+        if filesystem_local else ("", "")
+    )
     with _profile_db(params) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
@@ -904,7 +929,7 @@ def _(rid, params: dict) -> dict:
                 return _err(rid, 5007, f"move failed: {e}")
     if live is not None:
         try:
-            _set_session_cwd(live, resolved)
+            _set_session_cwd(live, resolved, filesystem_local=filesystem_local)
         except ValueError as e:
             return _err(rid, 4017, str(e))
         _emit("session.info", live_sid, _cwd_info(live, resolved, branch=branch))

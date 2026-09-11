@@ -73,6 +73,22 @@ def _session_cwd(session: dict | None) -> str:
     return str(session["cwd"]) if session and session.get("cwd") else _completion_cwd()
 
 
+def _active_terminal_filesystem_is_local() -> bool:
+    """Current terminal capability; unknown/malformed providers fail closed to non-local."""
+    try:
+        from tools.terminal_tool_backends import terminal_filesystem_scope
+
+        return terminal_filesystem_scope(_effective_terminal_backend()) == "local"
+    except Exception:
+        return False
+
+
+def _session_filesystem_is_local(session: dict | None) -> bool:
+    """Session-pinned locality, falling back to the active scoped provider contract."""
+    value = (session or {}).get("filesystem_local")
+    return value if type(value) is bool else _active_terminal_filesystem_is_local()
+
+
 # Sources whose launch directory is an artifact of how the app was started, not a workspace the user picked.
 _LAUNCH_CWD_NOT_A_WORKSPACE = {"desktop"}
 
@@ -513,17 +529,39 @@ def _persist_session_cwd_and_schedule_git_meta(session: dict, cwd: str, *, db=No
     return generation
 
 
-def _set_session_cwd(session: dict, cwd: str) -> str:
+def _set_session_cwd(
+    session: dict, cwd: str, *, filesystem_local: bool | None = None,
+) -> str:
     from hermes_constants import translate_cwd_for_wsl_backend
-    cwd = translate_cwd_for_wsl_backend(str(cwd))
-    resolved = os.path.abspath(os.path.expanduser(cwd))
-    if not os.path.isdir(resolved):
-        raise ValueError(f"working directory does not exist: {cwd}")
+    raw = str(cwd)
+    filesystem_local = (
+        _session_filesystem_is_local(session) if filesystem_local is None else filesystem_local
+    )
+    if filesystem_local:
+        raw = translate_cwd_for_wsl_backend(raw)
+        resolved = os.path.abspath(os.path.expanduser(raw))
+        if not os.path.isdir(resolved):
+            raise ValueError(f"working directory does not exist: {raw}")
+    else:
+        resolved = raw
+        if not resolved.strip():
+            raise ValueError("working directory required")
     # An explicit user choice: persisted as the workspace (not the launch-dir fallback), superseding a settle-adopted cwd.
-    session.update(cwd=resolved, explicit_cwd=True, cwd_from_settle=False)
+    session.update(
+        cwd=resolved, explicit_cwd=True, cwd_from_settle=False,
+        filesystem_local=filesystem_local,
+    )
     _register_session_cwd(session)
     # The synchronous DB write claims ordering authority; git probes may publish only for that exact generation.
-    _persist_session_cwd_and_schedule_git_meta(session, resolved)
+    if filesystem_local:
+        _persist_session_cwd_and_schedule_git_meta(session, resolved)
+    else:
+        try:
+            with _session_db(session) as owner_db:
+                if owner_db is not None:
+                    owner_db.update_session_cwd(session.get("session_key", ""), resolved)
+        except Exception:
+            logger.debug("failed to persist backend-owned session cwd", exc_info=True)
     with contextlib.suppress(Exception):
         from tools.terminal_tool_lifecycle import cleanup_vm
         cleanup_vm(session["session_key"])

@@ -68,3 +68,18 @@ def test_strict_directory_policy_preserves_local_board_validation(monkeypatch, t
     with pytest.raises(ValueError):
         project_paths.resolve_project_folder(
             str(regular_file), require_absolute_existing_directory=True)
+
+
+def test_remote_posix_basename_ending_in_backslash_is_byte_preserved(monkeypatch):
+    marker = "__HERMES_PROJECT_PATH_deadbeef__"
+    canonical = "/srv/projects/repo\\"
+    remote = _Env(
+        is_local=False,
+        output=f"{marker}_BEGIN\n{canonical}\n{marker}_END\n",
+    )
+    monkeypatch.setattr(project_paths, "acquire_terminal_environment", lambda **_kw: remote)
+    monkeypatch.setattr(project_paths.secrets, "token_hex", lambda _n: "deadbeef")
+
+    assert project_paths.resolve_project_folder("repo\\") == canonical
+    assert project_paths.canonical_storage_path(canonical) == canonical
+    assert project_paths.canonical_storage_path("//srv/projects/repo\\") == "//srv/projects/repo\\"

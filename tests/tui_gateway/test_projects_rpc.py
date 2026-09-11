@@ -289,6 +289,44 @@ def test_add_folder_and_for_cwd(tmp_path):
     assert "branch" in resolved
 
 
+def test_rpc_preserves_posix_backslash_basenames_across_path_mutations(monkeypatch):
+    from hermes_cli import project_paths
+
+    primary = "/remote/primary\\"
+    secondary = "/remote/secondary\\"
+    mapping = {"primary": primary, "secondary": secondary}
+    monkeypatch.setattr(
+        project_paths,
+        "resolve_project_folders",
+        lambda paths, primary_path=None, **_kw: (
+            [mapping[path] for path in paths], mapping.get(primary_path) if primary_path else None),
+    )
+    monkeypatch.setattr(
+        project_paths,
+        "resolve_project_folder",
+        lambda path, **_kw: mapping[path],
+    )
+    monkeypatch.setattr(
+        project_paths,
+        "resolve_project_folder_reference",
+        lambda _project, path, **_kw: mapping.get(path, path),
+    )
+
+    project = _call(
+        "projects.create",
+        {"name": "RPC slash literals", "folders": ["primary", "secondary"]},
+    )["project"]
+    project = _call(
+        "projects.set_primary", {"id": project["id"], "path": secondary},
+    )["project"]
+    project = _call(
+        "projects.remove_folder", {"id": project["id"], "path": primary},
+    )["project"]
+
+    assert project["primary_path"] == secondary
+    assert [folder["path"] for folder in project["folders"]] == [secondary]
+
+
 def test_for_cwd_resolves_remote_alias_without_controller_git_probe(monkeypatch):
     from hermes_cli import project_paths
     from hermes_cli import projects_db as pdb
@@ -351,6 +389,7 @@ def test_project_workspace_callback_trusts_validated_nonlocal_path(monkeypatch):
 
     assert session["cwd"] == "/remote/canonical/repo"
     assert session["explicit_cwd"] is True
+    assert session["filesystem_local"] is False
 
 
 def test_session_info_carries_project_for_owned_cwd(tmp_path):

@@ -120,6 +120,10 @@ def _format_ref_value(value: str) -> str:
 
 def _attachment_ref_path(session: dict, target: Path) -> str:
     """Workspace-relative path for an attachment, or the absolute path if outside."""
+    if not _session_filesystem_is_local(session):
+        # A backend cwd is opaque to the gateway. Staged attachments live in the
+        # controller-side profile home and must not be relativized against it.
+        return str(target.resolve())
     workspace = Path(_session_cwd(session)).resolve()
     try:
         return str(target.resolve().relative_to(workspace)).replace(os.sep, "/")
@@ -139,7 +143,10 @@ def _stage_session_file_attachment(
     Inside the workspace -> as-is; gateway-visible but outside -> copied into ``attachments/``
     (bind-mounted into container backends so ``@file:`` resolves in the sandbox); not on the
     gateway -> ``data_url`` bytes decoded into ``attachments/``."""
-    workspace = Path(_session_cwd(session)).resolve()
+    workspace = (
+        Path(_session_cwd(session)).resolve()
+        if _session_filesystem_is_local(session) else None
+    )
     resolved = None
     if raw_path:
         try:
@@ -155,12 +162,14 @@ def _stage_session_file_attachment(
                 found = _resolve_attachment_path(path_token)
                 resolved = Path(found).resolve() if found is not None else None
     if resolved is not None:
-        try:
-            resolved.relative_to(workspace)
-            return resolved, False
-        except ValueError:
-            payload = resolved.read_bytes()
-            filename = resolved.name
+        if workspace is not None:
+            try:
+                resolved.relative_to(workspace)
+                return resolved, False
+            except ValueError:
+                pass
+        payload = resolved.read_bytes()
+        filename = resolved.name
     else:
         if not data_url:
             raise ValueError("file not found on gateway and no data_url provided")

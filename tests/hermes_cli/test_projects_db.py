@@ -96,6 +96,26 @@ def test_canonical_remote_paths_cross_database_boundary_byte_for_byte(conn):
     assert pdb.project_for_path(conn, r"c:\work\repo\src").id == windows_pid
 
 
+def test_canonical_posix_backslash_basename_supports_ownership_and_mutations(conn):
+    primary = "/remote/workspace/primary\\"
+    secondary = "/remote/workspace/secondary\\"
+    pid = pdb.create_project(
+        conn,
+        name="Backslash names",
+        folders=[primary, secondary],
+        primary_path=primary,
+        canonical_paths=True,
+    )
+
+    project = pdb.get_project(conn, pid)
+    assert [folder.path for folder in project.folders] == [primary, secondary]
+    assert pdb.project_for_path(conn, primary + "/src").id == pid
+    assert pdb.set_primary(conn, pid, secondary, canonical_paths=True) is True
+    assert pdb.get_project(conn, pid).primary_path == secondary
+    assert pdb.remove_folder(conn, pid, primary, canonical_paths=True) is True
+    assert [folder.path for folder in pdb.get_project(conn, pid).folders] == [secondary]
+
+
 def test_create_dedups_by_primary_path(conn):
     pid = pdb.create_project(conn, name="GeoTrace", folders=["/www/geotrace"])
 

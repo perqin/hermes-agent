@@ -191,16 +191,23 @@ def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
             env_obj._hermes_backend_name = provider.name.strip().lower()
         except AttributeError:
             pass
+        # Provider metadata is the single contract for both declarative UI and live runtime
+        # locality. Only a literal bool is accepted; malformed values fail closed to non-local.
         try:
-            env_obj.is_local
-        except AttributeError:
-            try:
-                env_obj.is_local = bool(provider.filesystem_local)
-            except Exception:
-                try:
-                    env_obj.is_local = False
-                except AttributeError:
-                    pass
+            declared_locality = provider.filesystem_local
+        except Exception:
+            declared_locality = None
+        filesystem_local = declared_locality if type(declared_locality) is bool else False
+        try:
+            env_obj.is_local = filesystem_local
+        except (AttributeError, TypeError):
+            # Read-only environment capabilities are acceptable only when they already agree.
+            # Otherwise refusing creation is safer than granting contradictory local semantics.
+            if getattr(env_obj, "is_local", None) is not filesystem_local:
+                raise ValueError(
+                    f"Terminal environment provider {provider.name!r} returned an environment "
+                    "whose filesystem locality cannot be made consistent with provider metadata"
+                ) from None
         return env_obj
     try:
         from agent.terminal_env_registry import plugin_backend_names

@@ -108,5 +108,6 @@ class TerminalEnvironmentProvider(ProviderBase):
         """Create an execution environment (``BaseEnvironment`` duck type). MUST accept ``**kwargs`` and ignore
         unknown keys so the factory can evolve without breaking older plugins. ``task_id`` keys reuse/persistence;
         ``container_config`` carries ``container_cpu/memory/disk/persistent`` when :attr:`is_container`.
-        The returned object participates in the ``is_local`` filesystem capability contract; the
-        factory preserves an explicit value and stamps omitted values from provider metadata."""
+        The returned object participates in the ``is_local`` filesystem capability contract. The
+        factory overwrites it from a literal-boolean provider declaration so live execution and
+        declarative UI metadata cannot disagree; malformed declarations fail closed to non-local."""

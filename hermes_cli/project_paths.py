@@ -26,9 +26,11 @@ def canonical_storage_path(path: str) -> str:
     """Validate an already-canonical path without controller-side interpretation."""
     if not isinstance(path, str) or not path.strip():
         raise ValueError("folder path must not be empty")
-    if path == "/" or re.fullmatch(r"[A-Za-z]:[\\/]", path):
-        return path
-    return path.rstrip("/\\") or path
+    windows = bool(re.match(r"^[A-Za-z]:[\\/]", path) or path.startswith("\\"))
+    if windows:
+        _drive, tail = ntpath.splitdrive(path)
+        return path if tail in ("/", "\\") else (path.rstrip("/\\") or path)
+    return path if path == "/" else (path.rstrip("/") or path)
 
 
 def _remote_probe(path: str, marker: str, *, require_absolute: bool = False) -> str:
@@ -133,7 +135,7 @@ def resolve_project_folder_reference(
 def _path_parts(path: str) -> tuple[str, str, str]:
     """Return (style, normalized comparison key, separator) without host-OS semantics."""
     value = str(path)
-    windows = bool(re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith(("\\", "//")))
+    windows = bool(re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\"))
     if windows:
         return "windows", ntpath.normcase(ntpath.normpath(value)), "\\"
     return "posix", posixpath.normpath(value), "/"
@@ -145,8 +147,9 @@ def path_owns(folder: str, candidate: str) -> bool:
     candidate_style, candidate_key, _ = _path_parts(candidate)
     if folder_style != candidate_style:
         return False
-    stem = folder_key.rstrip("/\\") or separator
-    return candidate_key == folder_key or candidate_key.startswith(stem.rstrip("/\\") + separator)
+    stem = folder_key.rstrip(separator) or separator
+    prefix = separator if stem == separator else stem + separator
+    return candidate_key == folder_key or candidate_key.startswith(prefix)
 
 
 def canonical_path_key(path: str) -> tuple[str, str]:
@@ -157,7 +160,10 @@ def canonical_path_key(path: str) -> tuple[str, str]:
 
 def path_segments(path: str) -> list[str]:
     """Path-style-neutral display segments used by Project tree consumers."""
-    return [segment for segment in re.split(r"[/\\]", str(path or "").rstrip("/\\")) if segment]
+    value = str(path or "")
+    if is_windows_path(value):
+        return [segment for segment in re.split(r"[/\\]", value.rstrip("/\\")) if segment]
+    return [segment for segment in value.rstrip("/").split("/") if segment]
 
 
 def is_windows_path(path: str) -> bool:

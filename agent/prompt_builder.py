@@ -1588,6 +1588,12 @@ def build_context_files_prompt(
     AGENTS.md chain (git root → cwd) → CLAUDE.md (cwd) → .cursorrules + .cursor/rules/*.mdc (cwd). SOUL.md
     from HERMES_HOME is independent and always included unless *skip_soul* (already the identity slot).
     """
+    from agent.runtime_cwd import filesystem_is_local
+
+    if not filesystem_is_local():
+        # The cwd belongs to the execution backend. Controller-side context discovery cannot
+        # safely resolve/stat it, even when the same spelling happens to exist on this host.
+        return "" if skip_soul else load_soul_md(context_length, home_override=home_override)
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
     # A FALLBACK-picked cwd inside the Hermes install tree must not gain system-prompt authority (the desktop
     # default would load this repo's contributor AGENTS.md). An explicit cwd is honored verbatim.

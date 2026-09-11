@@ -152,7 +152,10 @@ def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
         # Project resolution already proved this canonical path in this exact session environment.
         resolved = str(path)
     # explicit switch supersedes a settle-adopted cwd
-    session.update(cwd=resolved, explicit_cwd=True, cwd_from_settle=False)
+    session.update(
+        cwd=resolved, explicit_cwd=True, cwd_from_settle=False,
+        filesystem_local=filesystem_local,
+    )
     _register_session_cwd(session)
     if filesystem_local:
         _persist_session_cwd_and_schedule_git_meta(session, resolved)

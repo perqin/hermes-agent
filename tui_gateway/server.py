@@ -1226,6 +1226,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             session_key=session_key, session_id=session_id, source=source,
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family, cwd=resolved,
+            filesystem_local=_session_filesystem_is_local(sess),
             ui_session_id=ui_session_id, cron_session="")
     return []
 
@@ -2068,7 +2069,9 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "yolo": yolo, "approval_mode": approval_mode,
         "tools": dict(mirror.get("tools") or {}) if isinstance(mirror.get("tools"), dict) else {},
         "skills": dict(mirror.get("skills") or {}) if isinstance(mirror.get("skills"), dict) else {},
-        "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd),
+        "cwd": cwd,
+        "branch": git_probe.branch(cwd) if _session_filesystem_is_local(session) else "",
+        "project": _project_info_for_cwd(cwd),
         "terminal_backend": _effective_terminal_backend(), "personality": str(personality or ""),
         "running": bool(sess.get("running")), "turn_started_at": _turn_started_at(session),
         "title": _session_live_title(sess, session_key) if session_key else "",
@@ -2353,6 +2356,7 @@ def _init_session(
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
             "history_version": 0, "inflight_turn": None, "created_at": now, "last_active": now,
             "running": False, "attached_images": [], "image_counter": 0, "cwd": cwd or _completion_cwd(),
+            "filesystem_local": _active_terminal_filesystem_is_local(),
             "explicit_cwd": bool(explicit_cwd), "cols": cols, "slash_worker": None,
             "show_reasoning": _load_show_reasoning(), "source": _resolve_session_source(source),
             "tool_progress_mode": _load_tool_progress_mode(), "edit_snapshots": {}, "tool_started_at": {},
@@ -2394,10 +2398,18 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
 # ── Methods: session ─────────────────────────────────────────────────
 
 
-def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "", profile: str | None = None) -> dict:
+def _lazy_resume_info(
+    cwd: str, *, model: str = "", provider: str = "", profile: str | None = None,
+    filesystem_local: bool | None = None,
+) -> dict:
     """session.info for a not-yet-built session (session.create's shape); tools/skills land with the deferred build."""
+    local = (
+        filesystem_local if type(filesystem_local) is bool
+        else _active_terminal_filesystem_is_local()
+    )
     return {
-        "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd),
+        "cwd": cwd, "branch": git_probe.branch(cwd) if local else "",
+        "project": _project_info_for_cwd(cwd),
         "model": model or _resolve_model(), "tools": {}, "skills": {}, "lazy": True,
         "desktop_contract": DESKTOP_BACKEND_CONTRACT, "profile_name": _response_profile_name(profile),
         **({"provider": provider} if provider else {}),
@@ -2416,6 +2428,7 @@ def _deferred_session_record(
         "agent": None, "agent_error": None, "agent_ready": threading.Event(), "attached_images": [],
         "close_on_disconnect": close_on_disconnect, "active_session_lease": lease, "cols": cols,
         "created_at": now, "cwd": cwd, "display_history_prefix": display_history_prefix or [],
+        "filesystem_local": _active_terminal_filesystem_is_local(),
         "edit_snapshots": {}, "explicit_cwd": bool(explicit_cwd), "history": history,
         "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
         "inflight_turn": None, "last_active": now, "lazy": lazy, "model_override": model_override,
@@ -2651,7 +2664,9 @@ def _fallback_session_info(session: dict) -> dict:
     # above already follows.
     cwd = _session_cwd(session)
     return {
-        "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd), "lazy": True,
+        "cwd": cwd,
+        "branch": git_probe.branch(cwd) if _session_filesystem_is_local(session) else "",
+        "project": _project_info_for_cwd(cwd), "lazy": True,
         "model": _resolve_model(), "skills": {}, "tools": {}, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
     }
 
