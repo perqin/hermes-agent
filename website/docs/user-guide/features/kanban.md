@@ -205,13 +205,26 @@ matters.
   project directory is the board-level workspace default every new task
   inherits (git repo → preserved worktree, plain dir → preserved
   directory); each task can still override it at creation time. Clearing
-  the field reverts new tasks to disposable scratch workspaces.
+  the field reverts new tasks to disposable scratch workspaces. The field
+  is always text: the dashboard resolves and validates it in the request
+  profile's terminal environment rather than against the browser or web
+  server filesystem, then displays the canonical path returned by the
+  backend.
 - **Archive** — only shown on non-`default` boards. Confirms, then moves
   the board dir to `boards/_archived/`.
 
 All dashboard API endpoints accept `?board=<slug>` for board scoping. The
 events WebSocket is pinned to a board at connection time; switching in
 the UI opens a fresh WS against the new board.
+
+When a Project is bound to a board through the Project CLI/server flow,
+the board snapshots that Project's canonical backend path. Every assignee
+profile on the board must be able to reach the same durable filesystem and
+canonical path. Workspace validation and Git worktree materialization run
+inside the assignee's terminal environment before agent execution; a
+worker that cannot reach the path is blocked rather than falling back to
+the dispatcher's local filesystem. Existing task workspaces are not moved
+when a board is rebound; the new binding applies to future tasks.
 
 
 ## File attachments
