@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -867,6 +868,30 @@ def test_project_dir_task_persists_immutable_workspace_provenance(home):
     assert task.workspace_project_slug == "remote-app"
 
 
+@pytest.mark.parametrize("root", ["/srv/project ", "/srv/project\\"])
+def test_backend_workspace_provenance_preserves_canonical_suffix(home, root):
+    kb.create_board(
+        "spaced",
+        project_id="p_space",
+        project_slug="space",
+        source_profile="owner",
+        default_workdir=root,
+        default_workspace_kind="worktree",
+        filesystem_local=False,
+    )
+    with kbc.connect(board="spaced") as conn:
+        task_id = kb.create_task(
+            conn,
+            title="preserve backend path",
+            assignee="worker-b",
+            board="spaced",
+        )
+        task = kb.get_task(conn, task_id)
+
+    assert task.workspace_root == root
+    assert task.workspace_path == f"{root}/.worktrees/{task_id}"
+
+
 def test_direct_remote_worktree_override_is_repo_root_and_persists_provenance(home):
     kb.create_board(
         "remote-git-override",
@@ -1101,3 +1126,32 @@ def test_legacy_project_dir_task_falls_back_to_its_immutable_path_without_board_
         "default_workspace_kind": "dir",
         "filesystem_local": None,
     }
+
+
+@pytest.mark.parametrize("malformed", ["false", 1, None])
+def test_malformed_persisted_locality_stays_unknown_and_requires_backend_preflight(
+    home, malformed,
+):
+    kb.create_board(
+        "malformed",
+        project_id="p_remote",
+        project_slug="remote-app",
+        source_profile="owner",
+        default_workdir="/srv/shared/remote-app",
+        default_workspace_kind="worktree",
+        filesystem_local=False,
+    )
+    metadata_path = kb.board_metadata_path("malformed")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["filesystem_local"] = malformed
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with kbc.connect(board="malformed") as conn:
+        task_id = kb.create_task(
+            conn, title="strict locality", assignee="worker-b", board="malformed")
+        task = kb.get_task(conn, task_id)
+        assert task.workspace_requires_preflight is True
+        assert task.workspace_filesystem_local is None
+        conn.execute(
+            "UPDATE tasks SET workspace_filesystem_local = 'false' WHERE id = ?", (task_id,))
+        assert kb.get_task(conn, task_id).workspace_filesystem_local is None

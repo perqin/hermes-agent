@@ -40,7 +40,8 @@ def _is_install_tree(p: Path) -> bool:
 
 def set_session_cwd(cwd: str | None) -> Token:
     """Pin the logical cwd for the current context."""
-    return _SESSION_CWD.set((cwd or "").strip())
+    raw = str(cwd or "")
+    return _SESSION_CWD.set(raw if raw.strip() else "")
 
 
 def clear_session_cwd() -> None:
@@ -106,13 +107,19 @@ def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
     ``override_is_final``: a set-but-missing session override yields None
     instead of falling through to TERMINAL_CWD.
     """
+    local = _filesystem_is_local()
     override = _SESSION_CWD.get()
-    override = "" if override is _UNSET else str(override).strip()
+    if override is _UNSET:
+        override = ""
+    else:
+        override = str(override)
+        override = override.strip() if local else (override if override.strip() else "")
     if override:
         p = _existing_dir(override, "configured working directory")
         if p is not None or override_is_final:
             return p
-    raw = scope_terminal_cwd().strip()
+    raw = scope_terminal_cwd()
+    raw = raw.strip() if local else (raw if raw.strip() else "")
     return _existing_dir(raw, "TERMINAL_CWD") if raw else None
 
 

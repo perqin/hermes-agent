@@ -38,7 +38,7 @@ export function useComposerBranch({ clearDraft, cwd, draftRef }: UseComposerBran
   // draft; a missing cwd / remote backend no-ops (the row hides the affordance).
   const handleBranchOff = useCallback(
     async (branch: string, base?: string) => {
-      const repoPath = cwd?.trim()
+      const repoPath = cwd?.trim() ? cwd : undefined
       const result = repoPath && (await startWorkInRepo(repoPath, { base, branch, name: branch }))
 
       if (result) {
@@ -59,7 +59,7 @@ export function useComposerBranch({ clearDraft, cwd, draftRef }: UseComposerBran
         return
       }
 
-      const repoPath = cwd?.trim()
+      const repoPath = cwd?.trim() ? cwd : undefined
 
       if (repoPath && isDefault) {
         await switchBranchInRepo(repoPath, branch)
@@ -78,14 +78,14 @@ export function useComposerBranch({ clearDraft, cwd, draftRef }: UseComposerBran
   )
 
   const handleListBranches = useCallback(async () => {
-    const repoPath = cwd?.trim()
+    const repoPath = cwd?.trim() ? cwd : undefined
 
     return repoPath ? listRepoBranches(repoPath) : []
   }, [cwd])
 
   const handleSwitchBranch = useCallback(
     async (branch: string) => {
-      const repoPath = cwd?.trim()
+      const repoPath = cwd?.trim() ? cwd : undefined
 
       if (repoPath) {
         await switchBranchInRepo(repoPath, branch)

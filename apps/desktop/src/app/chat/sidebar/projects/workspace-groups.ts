@@ -71,22 +71,32 @@ export interface SidebarProjectTree {
   previewSessions?: SessionInfo[]
 }
 
-/** Path split into segments, ignoring trailing slashes and mixed separators. */
-const segments = (path: string): string[] =>
-  path
-    .replace(/[/\\]+$/, '')
-    .split(/[/\\]/)
-    .filter(Boolean)
-
-/** A path with trailing separators stripped, for stable equality checks. */
-const normalizePath = (path: null | string | undefined): string => (path ?? '').replace(/[/\\]+$/, '')
-
-// Windows spellings: drive-letter (`C:\…`), UNC (`\\srv`, `//srv`), or any
-// backslash-rooted path (`\wsl.localhost\…`). A single leading `/` stays POSIX.
+// Windows spellings: drive-letter (`C:\\…`), UNC (`\\\\srv`, `//srv`), or any
+// backslash-rooted path (`\\wsl.localhost\\…`). A single leading `/` stays POSIX.
 // Mirrors the backend `_is_windows_path` so the live overlay places rows into
 // the same project the backend tree would.
 const isWindowsPath = (path: string): boolean =>
   /^[A-Za-z]:[/\\]/.test(path) || path.startsWith('\\') || path.startsWith('//')
+
+/** A path with only its own platform's trailing separators stripped. */
+const normalizePath = (path: null | string | undefined): string => {
+  const raw = path ?? ''
+
+  return isWindowsPath(raw) ? raw.replace(/[/\\]+$/, '') : raw.replace(/\/+$/, '')
+}
+
+const nonblankPath = (path: null | string | undefined): string => {
+  const raw = path ?? ''
+
+  return raw.trim() ? raw : ''
+}
+
+/** Path split into platform-aware segments. */
+const segments = (path: string): string[] => {
+  const normalized = normalizePath(path)
+
+  return normalized.split(isWindowsPath(normalized) ? /[/\\]/ : /\//).filter(Boolean)
+}
 
 /**
  * Segments for identity comparison: Windows paths fold case (and separators, via
@@ -109,7 +119,7 @@ export const baseName = (path: string): string | undefined => segments(path).pop
 // task worktrees (`<repo>/.worktrees/t_<hex>`, the `t_…` id kanban_db mints) so
 // the many ephemeral task worktrees collapse into one lane — while user-named
 // "New worktree" dirs (`<repo>/.worktrees/<slug>`) stay as their own lanes.
-const KANBAN_DIR_RE = /^(.*[/\\]\.worktrees)[/\\]t_[0-9a-f]+[/\\]?$/
+const KANBAN_DIR_RE = /^(.*[/\\]\.worktrees)[/\\]t_[0-9a-f]+(?:[/\\].*)?$/
 
 export function kanbanWorktreeDir(path: string): null | string {
   return path.match(KANBAN_DIR_RE)?.[1] ?? null
@@ -202,7 +212,7 @@ export function mergeRepoWorktreeGroups(
 
     if (wtPath && branch && !worktree.detached) {
       liveBranchByPath.set(wtPath, branch)
-      livePathByBranch.set(branch.toLowerCase(), worktree.path.trim())
+      livePathByBranch.set(branch.toLowerCase(), worktree.path)
     }
   }
 
@@ -304,7 +314,7 @@ export function mergeRepoWorktreeGroups(
   const seenLabels = new Set(merged.map(group => group.label.toLowerCase()))
 
   for (const worktree of discoveredWorktrees ?? []) {
-    const wtPath = worktree.path?.trim()
+    const wtPath = worktree.path?.trim() ? worktree.path : ''
 
     if (!wtPath) {
       continue
@@ -384,12 +394,12 @@ function isPathUnder(folder: string, target: string): boolean {
  * only the repo-root AUTO-project fallback needs cwd-under-root confidence.
  */
 export function liveSessionProjectId(session: SessionInfo, explicitProjects: ProjectInfo[]): null | string {
-  const cwd = (session.cwd || '').trim()
+  const cwd = nonblankPath(session.cwd)
   // A session may carry only a git_repo_root and no cwd — older/imported rows,
   // or ones captured before cwd tracking. The backend still groups those by repo
   // root, so anchor on it here too; otherwise the sidebar files the row under a
   // project but the color derivation drops it (the "grouped but grey" bug).
-  const repoRoot = (session.git_repo_root || '').trim() || cwd
+  const repoRoot = nonblankPath(session.git_repo_root) || cwd
   const anchor = cwd || repoRoot
 
   if (!anchor || kanbanWorktreeDir(anchor)) {
@@ -481,13 +491,13 @@ const upsertSession = (rows: SessionInfo[], session: SessionInfo): SessionInfo[]
 
 /** A live row's placement path, with an exact repo-root fallback when cwd is absent. */
 function livePathForRepo(repoRoot: string, session: SessionInfo): string {
-  const cwd = (session.cwd || '').trim()
+  const cwd = nonblankPath(session.cwd)
 
   if (cwd) {
     return cwd
   }
 
-  const persistedRoot = (session.git_repo_root || '').trim()
+  const persistedRoot = nonblankPath(session.git_repo_root)
 
   return persistedRoot && pathKey(persistedRoot) === pathKey(repoRoot) ? persistedRoot : ''
 }

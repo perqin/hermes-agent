@@ -83,3 +83,11 @@ def test_remote_posix_basename_ending_in_backslash_is_byte_preserved(monkeypatch
     assert project_paths.resolve_project_folder("repo\\") == canonical
     assert project_paths.canonical_storage_path(canonical) == canonical
     assert project_paths.canonical_storage_path("//srv/projects/repo\\") == "//srv/projects/repo\\"
+
+
+def test_double_slash_posix_paths_are_not_misclassified_as_windows():
+    assert project_paths.canonical_path_key("//srv/Repo") == ("posix", "//srv/Repo")
+    assert project_paths.path_owns("//srv/Repo", "//srv/Repo/child") is True
+    assert project_paths.path_owns("//srv/Repo", "//srv/repo/child") is False
+    assert project_paths.is_windows_path("//wsl.localhost/Ubuntu/home/alex") is True
+    assert project_paths.is_windows_path("//wsl$/Ubuntu/home/alex") is True

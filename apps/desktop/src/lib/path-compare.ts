@@ -5,8 +5,27 @@
  *  case. Compare through these rather than `===` / `startsWith`.
  */
 
-/** POSIX-style spelling: one separator, no trailing slash. */
-export const cleanPath = (path: string): string => path.trim().replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+/** Path-style-aware spelling: normalize Windows separators while preserving valid POSIX characters. */
+export const cleanPath = (path: string): string => {
+  const raw = path.trim() ? path : ''
+
+  if (!raw) {
+    return ''
+  }
+
+  const windows = /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith('\\\\')
+  const normalized = windows ? raw.replace(/\\/g, '/') : raw
+
+  return normalized.replace(/\/+$/, '') || '/'
+}
+
+/** Append a child without interpreting or trimming backend-owned path bytes. */
+export const joinPath = (parent: string, child: string): string => {
+  const windows = /^[A-Za-z]:[\\/]/.test(parent) || parent.startsWith('\\\\')
+  const separator = windows && parent.includes('\\') ? '\\' : '/'
+
+  return `${parent}${parent.endsWith('/') || (windows && parent.endsWith('\\')) ? '' : separator}${child}`
+}
 
 /** Case-folded comparison key. Windows drive/UNC paths are case-insensitive;
  *  POSIX paths are not, and callers that display a path want its real spelling,

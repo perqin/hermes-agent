@@ -165,7 +165,9 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
 def _backend_owned_project_binding(task: "Task", board: Optional[str]) -> Optional[dict]:
     """Return immutable task provenance requiring assignee-side preflight."""
     del board  # Board binding may have changed since task creation.
-    root = str(getattr(task, "workspace_root", None) or "").strip()
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    root = nonblank_backend_path(getattr(task, "workspace_root", None))
     if getattr(task, "workspace_requires_preflight", False) and root:
         return {
             "project_id": getattr(task, "project_id", None),
@@ -194,7 +196,7 @@ def _backend_owned_project_binding(task: "Task", board: Optional[str]) -> Option
                 "filesystem_local": None,
             }
     if getattr(task, "project_id", None) and getattr(task, "workspace_kind", None) == "dir":
-        legacy_path = str(getattr(task, "workspace_path", "") or "").strip()
+        legacy_path = nonblank_backend_path(getattr(task, "workspace_path", None))
         if legacy_path:
             return {
                 "project_id": task.project_id,
@@ -1598,6 +1600,11 @@ def _dispatch_lane_task(
     try:
         resolved_branch_name = None
         backend_binding = _backend_owned_project_binding(claimed, board)
+        if backend_binding is None and claimed.workspace_kind in {"dir", "worktree"}:
+            from hermes_cli.kanban_project_paths import legacy_host_workspace_allowed
+
+            if not legacy_host_workspace_allowed(claimed.assignee):
+                raise ValueError("Legacy workspace requires verified local controller and assignee policy")
         if backend_binding is not None:
             # Desired backend strings cross the controller unchanged.  The
             # assignee-side preflight validates and materializes them.

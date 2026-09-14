@@ -193,11 +193,9 @@ def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
             pass
         # Provider metadata is the single contract for both declarative UI and live runtime
         # locality. Only a literal bool is accepted; malformed values fail closed to non-local.
-        try:
-            declared_locality = provider.filesystem_local
-        except Exception:
-            declared_locality = None
-        filesystem_local = declared_locality if type(declared_locality) is bool else False
+        from agent.terminal_env_registry import provider_filesystem_locality
+
+        filesystem_local = provider_filesystem_locality(env_type) is True
         try:
             env_obj.is_local = filesystem_local
         except (AttributeError, TypeError):

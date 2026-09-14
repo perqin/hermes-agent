@@ -878,8 +878,8 @@ export interface Translations {
     projectDirectoryExplanation: string;
     projectDirectoryPending: string;
     projectDirectoryValidationError: string;
-    projectDirectoryOverrideHint?: string;
-    saving?: string;
+    projectDirectoryOverrideHint: string;
+    saving: string;
     commentHint?: string;
     commentHintTitle?: string;
     // Optional in-app confirm-dialog strings for the trash/delete flow;

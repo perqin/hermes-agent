@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from tools.terminal_tool import acquire_terminal_environment
+from hermes_cli.path_style import is_windows_path_style
 
 _PROJECT_PATH_TIMEOUT = 15
 
@@ -26,7 +27,7 @@ def canonical_storage_path(path: str) -> str:
     """Validate an already-canonical path without controller-side interpretation."""
     if not isinstance(path, str) or not path.strip():
         raise ValueError("folder path must not be empty")
-    windows = bool(re.match(r"^[A-Za-z]:[\\/]", path) or path.startswith("\\"))
+    windows = is_windows_path_style(path)
     if windows:
         _drive, tail = ntpath.splitdrive(path)
         return path if tail in ("/", "\\") else (path.rstrip("/\\") or path)
@@ -135,7 +136,7 @@ def resolve_project_folder_reference(
 def _path_parts(path: str) -> tuple[str, str, str]:
     """Return (style, normalized comparison key, separator) without host-OS semantics."""
     value = str(path)
-    windows = bool(re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\"))
+    windows = is_windows_path_style(value)
     if windows:
         return "windows", ntpath.normcase(ntpath.normpath(value)), "\\"
     return "posix", posixpath.normpath(value), "/"
@@ -147,8 +148,10 @@ def path_owns(folder: str, candidate: str) -> bool:
     candidate_style, candidate_key, _ = _path_parts(candidate)
     if folder_style != candidate_style:
         return False
-    stem = folder_key.rstrip(separator) or separator
-    prefix = separator if stem == separator else stem + separator
+    if folder_style == "posix" and folder_key.startswith("//") != candidate_key.startswith("//"):
+        return False
+    stem = folder_key.rstrip(separator) or folder_key
+    prefix = stem if stem.endswith(separator) else stem + separator
     return candidate_key == folder_key or candidate_key.startswith(prefix)
 
 

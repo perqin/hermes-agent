@@ -13,6 +13,7 @@ never shadow the in-tree docker/modal/... implementations. Scope semantics mirro
 from __future__ import annotations
 
 import logging
+import inspect
 from typing import List, Optional
 
 from agent.provider_registry import ProviderRegistry, lower_key
@@ -66,21 +67,27 @@ def provider_flag(name: str, attr: str, default=False):
         return default
 
 
-def provider_filesystem_scope(name: str) -> str:
-    """Return ``local``, ``non_local``, or ``unknown`` without creating an environment."""
+def provider_filesystem_locality(name: str) -> bool | None:
+    """Return a provider's literal declarative locality, or ``None`` when unknown.
+
+    Inspect the declaration without invoking descriptors: a computed property is not an
+    explicit capability grant, and the base class's inherited ``None`` remains unknown.
+    """
     provider = _registry.get_provider(name)
     if provider is None:
-        return "unknown"
+        return None
     try:
-        value = provider.filesystem_local
+        value = inspect.getattr_static(provider, "filesystem_local")
     except Exception:
         logger.debug("Terminal environment provider '%s' filesystem_local raised", name, exc_info=True)
-        return "unknown"
-    if value is True:
-        return "local"
-    if value is False:
-        return "non_local"
-    return "unknown"
+        return None
+    return value if type(value) is bool else None
+
+
+def provider_filesystem_scope(name: str) -> str:
+    """Return ``local``, ``non_local``, or ``unknown`` without creating an environment."""
+    value = provider_filesystem_locality(name)
+    return "local" if value is True else "non_local" if value is False else "unknown"
 
 
 def plugin_strip_env_keys() -> frozenset:

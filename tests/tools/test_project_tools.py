@@ -32,11 +32,11 @@ def test_project_create_resolves_in_session_environment_and_reports_workspace_fa
     project_tools.set_project_workspace_callback(
         lambda task_id, path, name: moved.append((task_id, path, name)))
 
-    result = json.loads(project_tools.project_create("Remote", "relative", task_id="session-1"))
+    result = json.loads(project_tools.project_create("Remote", "relative ", task_id="session-1"))
 
     assert result["success"] is True
     assert result["primary_path"] == "/remote/canonical/repo"
-    assert calls == [("relative", {"task_id": "session-1"})]
+    assert calls == [("relative ", {"task_id": "session-1"})]
     assert moved == [("session-1", "/remote/canonical/repo", "Remote")]
 
     project_tools.set_project_workspace_callback(

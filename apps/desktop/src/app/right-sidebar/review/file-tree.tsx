@@ -48,6 +48,7 @@ import { $currentCwd } from '@/store/session'
 
 import { pickRevealLabel } from '../file-actions'
 
+import { reviewErrorHandler } from './error-handler'
 import {
   buildReviewFlatList,
   buildReviewTree,
@@ -427,7 +428,9 @@ function ReviewFileRow({ node, depth }: { node: ReviewTreeNode; depth: number })
               className="size-4 rounded text-muted-foreground/70 hover:text-foreground"
               onClick={event => {
                 event.stopPropagation()
-                void (file.staged ? unstageReviewFile(file.path) : stageReviewFile(file.path))
+                void (file.staged ? unstageReviewFile(file.path) : stageReviewFile(file.path)).catch(
+                  reviewErrorHandler(file.staged ? c.unstage : c.stage)
+                )
               }}
               size="icon-xs"
               variant="ghost"
@@ -497,8 +500,8 @@ function ReviewFileContextMenu({
         <ContextMenuSeparator />
         <ContextMenuItem
           onSelect={() =>
-            void (file.staged ? unstageReviewFile(file.path) : stageReviewFile(file.path)).catch(err =>
-              notifyError(err, file.staged ? c.unstage : c.stage)
+            void (file.staged ? unstageReviewFile(file.path) : stageReviewFile(file.path)).catch(
+              reviewErrorHandler(file.staged ? c.unstage : c.stage)
             )
           }
         >

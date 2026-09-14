@@ -3,6 +3,7 @@ import { atom } from 'nanostores'
 import { useCallback, useEffect, useMemo } from 'react'
 
 import { desktopFsCacheKey } from '@/lib/desktop-fs'
+import { $projectFilesystemScope, projectFilesystemIsLocal } from '@/lib/project-filesystem-capability'
 import { $connection } from '@/store/session'
 import { $workspaceChangeTick, consumeWorkspaceChange } from '@/store/workspace-events'
 
@@ -238,10 +239,20 @@ async function loadRoot(
   try {
     ;({ entries, error } = await readProjectDir(cwd, cwd))
 
-    if (error && desktopFsCacheKey() === connectionKey) {
+    if (
+      error &&
+      error !== 'non-local-filesystem' &&
+      projectFilesystemIsLocal() &&
+      desktopFsCacheKey() === connectionKey
+    ) {
       const fallback = await fallbackRootFor(cwd, sourceIsRemote)
 
-      if (fallback) {
+      if (
+        fallback &&
+        projectFilesystemIsLocal() &&
+        desktopFsCacheKey() === connectionKey &&
+        $projectTree.get().requestId === requestId
+      ) {
         const retry = await readProjectDir(fallback, fallback)
 
         if (!retry.error) {
@@ -276,6 +287,8 @@ export function resetProjectTreeState() {
   clearProjectTree()
   clearProjectDirCache()
 }
+
+$projectFilesystemScope.listen(resetProjectTreeState)
 
 // Non-destructive live refresh as the agent edits: preserves expansion + loaded
 // subtrees (stable absolute-path ids let rows animate in/out), never collapses.
@@ -374,6 +387,7 @@ async function revalidateTree(
  * whole tree (used after cwd change or manual refresh).
  */
 export function useProjectTree(cwd: string): UseProjectTreeResult {
+  const filesystemScope = useStore($projectFilesystemScope)
   const state = useStore($projectTree)
   const connection = useStore($connection)
   const workspaceTick = useStore($workspaceChangeTick)
@@ -487,7 +501,7 @@ export function useProjectTree(cwd: string): UseProjectTreeResult {
     }
 
     void loadRoot(cwd, { connectionKey })
-  }, [connectionKey, cwd])
+  }, [connectionKey, cwd, filesystemScope])
 
   // Self-heal: an errored root re-probes every few seconds while the tree is
   // mounted. Each attempt bumps requestId, so a persistent error re-arms the

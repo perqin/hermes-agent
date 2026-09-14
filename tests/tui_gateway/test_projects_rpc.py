@@ -338,18 +338,33 @@ def test_for_cwd_resolves_remote_alias_without_controller_git_probe(monkeypatch)
     remote = type("RemoteEnvironment", (), {"is_local": False})()
     monkeypatch.setattr(
         "tools.terminal_tool.acquire_terminal_environment", lambda **_kw: remote)
-    monkeypatch.setattr(
-        project_paths, "resolve_project_folder",
-        lambda path, **kwargs: "/remote/repo/src")
+    seen = []
+
+    def _resolve(path, **_kwargs):
+        seen.append(path)
+        return "/remote/repo/src "
+
+    monkeypatch.setattr(project_paths, "resolve_project_folder", _resolve)
     monkeypatch.setattr(
         server.git_probe, "branch",
         lambda *_a: (_ for _ in ()).throw(AssertionError("controller git probe called")))
 
-    result = _call("projects.for_cwd", {"cwd": "../alias/src"})
+    result = _call("projects.for_cwd", {"cwd": "../alias/src "})
 
-    assert result["cwd"] == "/remote/repo/src"
+    assert seen == ["../alias/src "]
+    assert result["cwd"] == "/remote/repo/src "
     assert result["project"]["id"] == pid
     assert result["branch"] == ""
+
+
+def test_for_cwd_blank_returns_jsonrpc_success_envelope():
+    response = server._methods["projects.for_cwd"]("blank-id", {"cwd": "  "})
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": "blank-id",
+        "result": {"project": None, "branch": "", "cwd": ""},
+    }
 
 
 def test_project_info_for_cwd_returns_status_payload(tmp_path):

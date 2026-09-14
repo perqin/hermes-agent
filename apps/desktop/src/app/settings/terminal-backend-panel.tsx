@@ -6,7 +6,6 @@ import { useI18n } from '@/i18n'
 import { AlertTriangle, Check, Loader2, RefreshCw } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
-import { invalidateProjectFilesystemCapabilities } from '@/store/projects'
 import type { TerminalBackendInfo, TerminalBackendsResponse } from '@/types/hermes'
 
 import { Pill } from './primitives'
@@ -89,7 +88,7 @@ export function TerminalBackendPanel({ onConfiguredChange }: TerminalBackendPane
             }
           : current
       )
-      invalidateProjectFilesystemCapabilities()
+
       notify({ kind: 'success', title: copy.selectedTitle, message: copy.selectedMessage(backend.label) })
       onConfiguredChange?.()
     } catch (err) {

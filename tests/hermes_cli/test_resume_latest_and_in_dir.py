@@ -277,3 +277,61 @@ def test_in_dir_leaves_unset_terminal_cwd_unset(main_mod, monkeypatch, tmp_path)
     main_mod._apply_in_dir(_args(in_dir=str(target)))
 
     assert "TERMINAL_CWD" not in os.environ
+
+
+def test_remote_resume_validates_in_backend_without_host_chdir_and_preserves_suffix(
+    main_mod, monkeypatch,
+):
+    import contextlib
+    import os
+
+    saved = "/srv/stored workspace " + chr(92)
+    canonical = "/srv/canonical workspace " + chr(92)
+
+    class DB:
+        def get_session(self, _session_id):
+            return {"cwd": saved}
+
+    @contextlib.contextmanager
+    def session_db():
+        yield DB()
+
+    monkeypatch.setattr(main_mod, "_session_db", session_db)
+    monkeypatch.setattr(main_mod, "_resolve_session_by_name_or_id", lambda value: value)
+    monkeypatch.setattr(
+        "tools.terminal_tool.acquire_terminal_environment",
+        lambda **_kwargs: type("RemoteEnvironment", (), {"is_local": False})(),
+    )
+    seen = []
+    monkeypatch.setattr(
+        "hermes_cli.project_paths.resolve_project_folder",
+        lambda raw, **kwargs: seen.append((raw, kwargs)) or canonical,
+    )
+    real_isdir = main_mod.os.path.isdir
+    monkeypatch.setattr(
+        main_mod.os.path,
+        "isdir",
+        lambda path: pytest.fail("host stat called for remote cwd")
+        if str(path).startswith("/srv/") else real_isdir(path),
+    )
+    real_realpath = main_mod.os.path.realpath
+    monkeypatch.setattr(
+        main_mod.os.path,
+        "realpath",
+        lambda path: pytest.fail("host realpath called for remote cwd")
+        if str(path).startswith("/srv/") else real_realpath(path),
+    )
+    real_chdir = main_mod.os.chdir
+    monkeypatch.setattr(
+        main_mod.os,
+        "chdir",
+        lambda path: pytest.fail("host chdir called for remote cwd")
+        if str(path).startswith("/srv/") else real_chdir(path),
+    )
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+    args = _args(resume="remote-session")
+    main_mod._resolve_chat_session_args(args, use_tui=False)
+
+    assert seen and seen[0][0] == saved
+    assert os.environ["TERMINAL_CWD"] == canonical

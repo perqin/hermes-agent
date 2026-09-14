@@ -213,7 +213,7 @@ export function ProjectDialog() {
 
     if (mode === 'rename' && projectId) {
       if (trimmed) {
-        await runSubmit(() => renameProject(projectId, trimmed))
+        await runSubmit(() => renameProject(projectId, trimmed, state?.context))
       }
 
       return

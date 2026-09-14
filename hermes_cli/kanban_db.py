@@ -40,6 +40,18 @@ def _row_get(row: Any, col: str, default: Any = None) -> Any:
     return row[col]
 
 
+def _literal_optional_bool(value: Any) -> bool | None:
+    """Decode a declarative JSON/API tri-state without truthiness coercion."""
+    return value if type(value) is bool else None
+
+
+def _sqlite_optional_bool(value: Any) -> bool | None:
+    """Decode SQLite's integer representation of a tri-state boolean."""
+    if type(value) is int and value in (0, 1):
+        return bool(value)
+    return None
+
+
 def _json_or(value: Any, default: Any = None) -> Any:
     """Decode a JSON text column; any decode failure or empty value yields ``default``."""
     if not value:
@@ -542,23 +554,31 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
         "project_slug": None,
         "source_profile": None,
         "default_workspace_kind": None,
-        # Capability snapshot, not a provider/backend identity.  ``None`` keeps
-        # old board rows conservative until they are rebound or revalidated.
+        # Capability snapshot, not a provider/backend identity.  Legacy
+        # unbound boards are controller-local; legacy Project bindings remain
+        # unknown until they are rebound or revalidated.
         "filesystem_local": None,
         "created_at": None,
         "archived": False,
     }
+    locality_declared = False
+    metadata_verified = False
     try:
         p = board_metadata_path(slug)
-        if p.exists():
-            raw = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                # Never let the metadata file claim a different slug than
-                # its directory — trust the filesystem.
-                raw["slug"] = slug
-                meta.update(raw)
-    except (OSError, json.JSONDecodeError):
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            metadata_verified = True
+            locality_declared = "filesystem_local" in raw
+            # Never let the metadata file claim a different slug than
+            # its directory — trust the filesystem.
+            raw["slug"] = slug
+            meta.update(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError):
         pass
+    if locality_declared:
+        meta["filesystem_local"] = _literal_optional_bool(meta.get("filesystem_local"))
+    elif metadata_verified and not meta.get("project_id"):
+        meta["filesystem_local"] = True
     meta["db_path"] = str(kanban_db_path(slug))
     return meta
 
@@ -602,7 +622,7 @@ def write_board_metadata(
         if value is not None:
             meta[key] = str(value) if value else None
     if filesystem_local is not None:
-        meta["filesystem_local"] = bool(filesystem_local)
+        meta["filesystem_local"] = _literal_optional_bool(filesystem_local)
     if not meta.get("created_at"):
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
@@ -768,10 +788,7 @@ class Task:
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
             workspace_requires_preflight=bool(g("workspace_requires_preflight")),
-            workspace_filesystem_local=(
-                None if g("workspace_filesystem_local") is None
-                else bool(g("workspace_filesystem_local"))
-            ),
+            workspace_filesystem_local=_sqlite_optional_bool(g("workspace_filesystem_local")),
         )
 
 
@@ -1193,7 +1210,9 @@ def _project_snapshot_from_board(board: Optional[str]) -> tuple[Any, str, str] |
     meta = _board_meta_for(board)
     project_id = str(meta.get("project_id") or "").strip()
     project_slug = str(meta.get("project_slug") or "").strip()
-    project_root = str(meta.get("default_workdir") or "").strip()
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    project_root = nonblank_backend_path(meta.get("default_workdir"))
     if not (project_id and project_slug and project_root):
         return None
     kind = str(meta.get("default_workspace_kind") or "worktree").strip()
@@ -1392,10 +1411,25 @@ def create_task(
         if board_default:
             workspace_path = str(board_default)
 
+    # Missing Board metadata is not a locality grant: legacy host workspaces
+    # require verified local controller and assignee policy as well as absence.
+    # Explicit/resolved Projects always retain their own backend provenance.
+    legacy_standalone = False
+    if project_obj is None and not project_id:
+        try:
+            board_metadata_path(board_meta["slug"]).stat()
+        except FileNotFoundError:
+            from hermes_cli.kanban_project_paths import legacy_host_workspace_allowed
+
+            legacy_standalone = legacy_host_workspace_allowed(assignee)
+        except OSError:
+            pass
+
     backend_board_worktree = (
-        project_obj is None
+        not legacy_standalone
+        and project_obj is None
         and workspace_kind == "worktree"
-        and board_meta.get("filesystem_local") is False
+        and board_meta.get("filesystem_local") is not True
         and bool(workspace_path)
     )
 
@@ -1405,17 +1439,26 @@ def create_task(
     workspace_source_profile = None
     workspace_project_slug = None
     if project_obj is not None:
-        workspace_root = str(project_obj.primary_path or project_repo or "").strip() or None
+        from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+        workspace_root = nonblank_backend_path(project_obj.primary_path or project_repo) or None
         workspace_requires_preflight = bool(workspace_root)
-        workspace_filesystem_local = board_meta.get("filesystem_local")
+        workspace_filesystem_local = (
+            board_meta.get("filesystem_local")
+            if board_meta.get("project_id") == project_obj.id
+            and board_meta.get("default_workdir") == workspace_root else None
+        )
         workspace_source_profile = str(board_meta.get("source_profile") or "").strip() or None
         workspace_project_slug = str(
             board_meta.get("project_slug") or getattr(project_obj, "slug", "") or ""
         ).strip() or None
-    elif board_meta.get("filesystem_local") is False and workspace_kind in {"dir", "worktree"}:
-        workspace_root = str(workspace_path or board_meta.get("default_workdir") or "").strip() or None
+    elif (not legacy_standalone and board_meta.get("filesystem_local") is not True
+          and workspace_kind in {"dir", "worktree"}):
+        from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+        workspace_root = nonblank_backend_path(workspace_path or board_meta.get("default_workdir")) or None
         workspace_requires_preflight = bool(workspace_root)
-        workspace_filesystem_local = False
+        workspace_filesystem_local = board_meta.get("filesystem_local")
         workspace_source_profile = str(board_meta.get("source_profile") or "").strip() or None
 
     # Retry once on the extremely unlikely id collision.
@@ -1430,14 +1473,16 @@ def create_task(
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
                     if project_repo and not workspace_path:
-                        separator = "\\" if "\\" in project_repo and "/" not in project_repo else "/"
-                        workspace_path = project_repo.rstrip("/\\") + separator + separator.join((".worktrees", task_id))
+                        from hermes_cli.kanban_project_paths import join_backend_path
+
+                        workspace_path = join_backend_path(project_repo, ".worktrees", task_id)
                     if not branch_name:
                         branch_name = _project_branch_name(project_obj, task_id, title)
                 elif backend_board_worktree:
                     root = str(workspace_root)
-                    separator = "\\" if "\\" in root and "/" not in root else "/"
-                    workspace_path = root.rstrip("/\\") + separator + separator.join((".worktrees", task_id))
+                    from hermes_cli.kanban_project_paths import join_backend_path
+
+                    workspace_path = join_backend_path(root, ".worktrees", task_id)
                     if not branch_name:
                         branch_name = f"wt/{task_id}"
 
@@ -1461,7 +1506,7 @@ def create_task(
                         created_by, now, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
                         workspace_root, 1 if workspace_requires_preflight else 0,
-                        (None if workspace_filesystem_local is None else int(bool(workspace_filesystem_local))),
+                        (None if type(workspace_filesystem_local) is not bool else int(workspace_filesystem_local)),
                         workspace_source_profile, workspace_project_slug,
                         _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,

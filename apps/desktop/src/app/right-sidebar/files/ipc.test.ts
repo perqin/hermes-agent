@@ -5,6 +5,8 @@ import { Buffer } from 'node:buffer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesReadDirEntry, HermesReadDirResult } from '@/global'
+import { setProjectFilesystemScope } from '@/lib/project-filesystem-capability'
+import { $connection } from '@/store/session'
 
 import { clearProjectDirCache, readProjectDir } from './ipc'
 
@@ -34,6 +36,7 @@ function installBridge() {
 
 describe('readProjectDir', () => {
   beforeEach(() => {
+    setProjectFilesystemScope('local')
     clearProjectDirCache()
     readDir.mockReset()
     readFileDataUrl.mockReset()
@@ -42,6 +45,8 @@ describe('readProjectDir', () => {
   })
 
   afterEach(() => {
+    $connection.set(null)
+    setProjectFilesystemScope('unknown')
     clearProjectDirCache()
     delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
   })
@@ -51,6 +56,73 @@ describe('readProjectDir', () => {
 
     await expect(readProjectDir('/repo')).resolves.toEqual({ entries: [], error: 'no-bridge' })
   })
+
+  it.each(['non_local', 'unknown'] as const)('fails closed before filesystem or git IPC for %s scope', async scope => {
+    setProjectFilesystemScope(scope)
+
+    await expect(readProjectDir('/backend/repo')).resolves.toEqual({ entries: [], error: 'non-local-filesystem' })
+    expect(readDir).not.toHaveBeenCalled()
+    expect(gitRoot).not.toHaveBeenCalled()
+    expect(readFileDataUrl).not.toHaveBeenCalled()
+  })
+
+  it('stops before git discovery when capability changes during the directory read', async () => {
+    readDir.mockImplementation(async () => {
+      setProjectFilesystemScope('unknown')
+
+      return ok([{ name: 'a', path: '/old/a', isDirectory: false }])
+    })
+    await expect(readProjectDir('/old')).resolves.toEqual({ entries: [], error: 'non-local-filesystem' })
+    expect(gitRoot).not.toHaveBeenCalled()
+  })
+
+  it.each(['directory', 'git-root', 'ignore-listing', 'ignore-content'])(
+    'abandons the old route after the %s await, even on a profile round trip',
+    async boundary => {
+      const invalidate = () => {
+        $connection.set({ mode: 'local', profile: 'other' } as never)
+        $connection.set(null)
+      }
+
+      let reads = 0
+      readDir.mockImplementation(async () => {
+        reads += 1
+
+        if ((boundary === 'directory' && reads === 1) || (boundary === 'ignore-listing' && reads === 2)) {
+          invalidate()
+        }
+
+        return ok([{ name: '.gitignore', path: '/old/.gitignore', isDirectory: false }])
+      })
+      gitRoot.mockImplementation(async () => {
+        if (boundary === 'git-root') {
+          invalidate()
+        }
+
+        return '/old'
+      })
+      readFileDataUrl.mockImplementation(async () => {
+        if (boundary === 'ignore-content') {
+          invalidate()
+        }
+
+        return dataUrl('')
+      })
+      await expect(readProjectDir('/old')).resolves.toEqual({ entries: [], error: 'non-local-filesystem' })
+
+      if (boundary === 'directory') {
+        expect(gitRoot).not.toHaveBeenCalled()
+      }
+
+      if (boundary === 'git-root') {
+        expect(readDir).toHaveBeenCalledTimes(1)
+      }
+
+      if (boundary === 'ignore-listing') {
+        expect(readFileDataUrl).not.toHaveBeenCalled()
+      }
+    }
+  )
 
   it('filters gitignored entries when readDir returns Windows-style paths', async () => {
     gitRoot.mockResolvedValue('C:\\repo')
@@ -63,11 +135,11 @@ describe('readProjectDir', () => {
         ])
       }
 
-      if (path === 'C:/repo') {
-        return ok([{ name: '.gitignore', path: 'C:/repo/.gitignore', isDirectory: false }])
+      if (path === 'C:\\repo') {
+        return ok([{ name: '.gitignore', path: 'C:\\repo\\.gitignore', isDirectory: false }])
       }
 
-      if (path === 'C:/repo/src') {
+      if (path === 'C:\\repo\\src') {
         return ok([])
       }
 
@@ -78,8 +150,8 @@ describe('readProjectDir', () => {
     const result = await readProjectDir('C:\\repo\\src', 'C:\\repo')
 
     expect(result.entries.map(entry => entry.name)).toEqual(['keep.ts'])
-    expect(gitRoot).toHaveBeenCalledWith('C:/repo')
-    expect(readFileDataUrl).toHaveBeenCalledWith('C:/repo/.gitignore')
+    expect(gitRoot).toHaveBeenCalledWith('C:\\repo')
+    expect(readFileDataUrl).toHaveBeenCalledWith('C:\\repo\\.gitignore')
   })
 
   it('filters gitignored entries when Windows path casing differs across IPC results', async () => {
@@ -92,11 +164,11 @@ describe('readProjectDir', () => {
         ])
       }
 
-      if (path === 'C:/Repo') {
-        return ok([{ name: '.gitignore', path: 'C:/Repo/.gitignore', isDirectory: false }])
+      if (path === 'C:\\Repo') {
+        return ok([{ name: '.gitignore', path: 'C:\\Repo\\.gitignore', isDirectory: false }])
       }
 
-      if (path === 'C:/Repo/src') {
+      if (path === 'C:\\Repo\\src') {
         return ok([])
       }
 

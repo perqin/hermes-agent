@@ -118,7 +118,9 @@ def _backend_worktree_binding(conn: sqlite3.Connection, task_id: str, path: str)
         return None
     if task is None:
         return None
-    root = str(getattr(task, "workspace_root", None) or "").strip()
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    root = nonblank_backend_path(getattr(task, "workspace_root", None))
     if getattr(task, "workspace_requires_preflight", False) and root:
         return task, {
             "project_id": getattr(task, "project_id", None),
@@ -498,7 +500,11 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
     if not task.workspace_path:
         board_slug = board if board else _kb.get_current_board()
-        board_default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
+        from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+        board_default = nonblank_backend_path(
+            _kb.read_board_metadata(board_slug).get("default_workdir")
+        )
         if not board_default:
             raise ValueError(
                 f"task {task.id} has workspace_kind=worktree but no workspace_path, "

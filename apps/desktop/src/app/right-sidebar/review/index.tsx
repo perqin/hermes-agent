@@ -12,7 +12,6 @@ import { useI18n } from '@/i18n'
 import { displayPath } from '@/lib/display-path'
 import { cn } from '@/lib/utils'
 import { $panesFlipped } from '@/store/layout'
-import { notifyError } from '@/store/notifications'
 import {
   $reviewDiff,
   $reviewDiffLoading,
@@ -36,6 +35,7 @@ import {
 import { SidebarPanelLabel } from '../../shell/sidebar-label'
 import { PaneEmptyState, RightSidebarSectionHeader } from '../index'
 
+import { reviewErrorHandler } from './error-handler'
 import { ReviewFileTree } from './file-tree'
 import { ReviewShipBar } from './ship-bar'
 
@@ -99,7 +99,7 @@ export function ReviewPane() {
               aria-label={c.stageAll}
               className={ACTION_BTN}
               disabled={!hasFiles}
-              onClick={() => void stageReviewFile(null).catch(err => notifyError(err, c.stageAll))}
+              onClick={() => void stageReviewFile(null).catch(reviewErrorHandler(c.stageAll))}
               size="icon-xs"
               variant="ghost"
             >
@@ -168,7 +168,7 @@ export function ReviewPane() {
                 onClick={() =>
                   void (
                     selectedFile.staged ? unstageReviewFile(selectedFile.path) : stageReviewFile(selectedFile.path)
-                  ).catch(err => notifyError(err, c.stage))
+                  ).catch(reviewErrorHandler(c.stage))
                 }
                 size="icon-xs"
                 variant="ghost"
@@ -221,8 +221,9 @@ export function ReviewPane() {
         // confirmRevert closes the dialog itself, then reverts in the
         // background — so the failure lands in a toast, not inline.
         dismissOnConfirm
+        isCurrent={() => $reviewRevertTarget.get() === revertTarget}
         onClose={cancelRevert}
-        onConfirm={() => confirmRevert().catch(err => void notifyError(err, c.revert))}
+        onConfirm={() => confirmRevert().catch(reviewErrorHandler(c.revert))}
         open={revertTarget !== undefined}
         title={revertingAll ? c.revertAll : c.revert}
       />

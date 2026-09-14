@@ -251,6 +251,8 @@ def test_project_directory_helper_pending_and_validation_copy_exist_in_every_web
             "projectDirectoryExplanation",
             "projectDirectoryPending",
             "projectDirectoryValidationError",
+            "projectDirectoryOverrideHint",
+            "saving",
         ):
             assert f"{key}:" in text, f"{filename} is missing {key}"
 

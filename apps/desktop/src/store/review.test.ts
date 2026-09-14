@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesReviewFile, HermesReviewShipInfo } from '@/global'
+import { projectFilesystemConfigWritten, setProjectFilesystemScope } from '@/lib/project-filesystem-capability'
+import { $gatewayActivationGeneration } from '@/store/gateway'
 
+import { refreshRepoStatus } from './coding-status'
+import { stampSessionPrBranch } from './pull-requests'
 import {
   $reviewCommitDefault,
   $reviewCommitMsgBusy,
@@ -27,6 +31,7 @@ import {
   createOrOpenPr,
   generateCommitMessage,
   openReview,
+  openReviewForPath,
   pushChanges,
   refreshReview,
   refreshShipInfo,
@@ -39,7 +44,7 @@ import {
   toggleReviewTreeMode,
   unstageReviewFile
 } from './review'
-import { $currentCwd } from './session'
+import { $connection, $currentCwd, $selectedStoredSessionId, $sessions } from './session'
 
 // requestOneShot is the only cross-module dependency that must be faked (it
 // reaches the gateway); everything else routes through window.hermesDesktop.git,
@@ -50,7 +55,11 @@ vi.mock('@/lib/oneshot', () => ({ requestOneShot: (args: unknown) => requestOneS
 // doesn't try to hit the (absent) probe and log. repoStatusForCwd is read when a
 // new PR binds its session to the branch it came from — no probe here, so no
 // branch either.
-vi.mock('./coding-status', () => ({ refreshRepoStatus: vi.fn(), repoStatusForCwd: () => ({ get: () => null }) }))
+vi.mock('./coding-status', () => ({
+  refreshRepoStatus: vi.fn(),
+  repoStatusForCwd: () => ({ get: () => ({ branch: 'origin-branch' }) })
+}))
+vi.mock('./pull-requests', () => ({ stampSessionPrBranch: vi.fn() }))
 
 function file(path: string, over: Partial<HermesReviewFile> = {}): HermesReviewFile {
   return { path, status: 'modified', staged: false, added: 1, removed: 0, ...over } as HermesReviewFile
@@ -84,6 +93,8 @@ function stubReview(over: ReviewStub = {}) {
 }
 
 beforeEach(() => {
+  $currentCwd.set('')
+  setProjectFilesystemScope('local')
   requestOneShot.mockClear()
   requestOneShot.mockResolvedValue('generated message')
   // Reset stores touched across tests.
@@ -104,10 +115,154 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setProjectFilesystemScope('unknown')
   delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
 })
 
+describe('retired review errors', () => {
+  it.each(['close', 'pinned session'] as const)(
+    'retires generation and frees its busy flag on %s',
+    async transition => {
+      let reject!: (error: Error) => void
+      stubReview({
+        commitContext: vi.fn(
+          () =>
+            new Promise((_, fail) => {
+              reject = fail
+            })
+        )
+      })
+
+      if (transition === 'pinned session') {
+        openReview('/pinned', 'tile')
+      }
+
+      const result = generateCommitMessage()
+
+      if (transition === 'close') {
+        closeReview()
+      } else {
+        $selectedStoredSessionId.set('generation-replacement')
+      }
+
+      expect($reviewCommitMsgBusy.get()).toBe(false)
+      reject(new Error('retired'))
+      await expect(result).resolves.toBe('')
+    }
+  )
+
+  const actions = [
+    ['stage', () => stageReviewFile('a.ts')],
+    ['unstage', () => unstageReviewFile('a.ts')],
+    ['revert', () => revertReviewFile('a.ts')],
+    ['commit', () => commitChanges('message')],
+    ['push', () => pushChanges()],
+    ['createPr', () => createOrOpenPr()],
+    ['commitContext', () => generateCommitMessage()]
+  ] as const
+
+  it.each(actions)('suppresses retired %s rejection but preserves current errors', async (method, action) => {
+    let reject!: (error: Error) => void
+    const failure = new Error('operation failed')
+    stubReview({
+      [method]: vi.fn(
+        () =>
+          new Promise((_, fail) => {
+            reject = fail
+          })
+      )
+    })
+    const result = action()
+    $reviewScopeTarget.set('other')
+    $reviewScopeTarget.set('main')
+    reject(failure)
+    await expect(result).resolves.toBe(method === 'commitContext' ? '' : undefined)
+    stubReview({ [method]: vi.fn().mockRejectedValue(failure) })
+    await expect(action()).rejects.toBe(failure)
+  })
+})
+
+describe('revert confirmation ownership', () => {
+  it.each(['close', 'pinned session'] as const)('retires confirmations on %s', async transition => {
+    const review = stubReview()
+
+    if (transition === 'pinned session') {
+      openReview('/pinned', 'tile')
+    }
+
+    requestRevert(null)
+
+    if (transition === 'close') {
+      closeReview()
+    } else {
+      $selectedStoredSessionId.set('replacement-session')
+    }
+
+    expect($reviewRevertTarget.get()).toBeUndefined()
+    await confirmRevert()
+    expect(review.revert).not.toHaveBeenCalled()
+  })
+
+  it('does not select a same-path file in a replacement pane after refresh', async () => {
+    let finish!: (value: { files: HermesReviewFile[] }) => void
+
+    const pending = new Promise<{ files: HermesReviewFile[] }>(resolve => {
+      finish = resolve
+    })
+
+    const review = stubReview({ list: vi.fn(() => pending) })
+    $reviewOpen.set(true)
+    const opening = openReviewForPath('a.ts')
+    $reviewScopeTarget.set('other')
+    $reviewScopeTarget.set('main')
+    $reviewFiles.set([file('a.ts')])
+    finish({ files: [file('a.ts')] })
+    await opening
+    expect($reviewSelectedPath.get()).toBeNull()
+    expect(review.diff).not.toHaveBeenCalled()
+  })
+
+  it.each(['a.ts', null])('retires pending %s across cwd roundtrip', async path => {
+    const review = stubReview()
+    requestRevert(path)
+    $currentCwd.set('/other')
+    $currentCwd.set('/repo')
+    expect($reviewRevertTarget.get()).toBeUndefined()
+    await confirmRevert()
+    expect(review.revert).not.toHaveBeenCalled()
+  })
+})
+
 describe('refreshReview', () => {
+  it('invalidates the pinned repo before gateway activation publishes its connection', async () => {
+    const review = stubReview()
+    openReview('/old-pinned')
+    requestRevert('a.ts')
+    $gatewayActivationGeneration.set($gatewayActivationGeneration.get() + 1)
+    await stageReviewFile('a.ts')
+    await confirmRevert()
+    expect(review.stage).not.toHaveBeenCalled()
+    expect(review.revert).not.toHaveBeenCalled()
+    expect($reviewScopeCwd.get()).toBeNull()
+  })
+
+  it('drops pinned review and pending revert when the active profile changes', async () => {
+    const review = stubReview()
+    openReview('/old-pinned')
+    requestRevert('a.ts')
+    $connection.set({ mode: 'local', profile: 'other' } as never)
+    await stageReviewFile('a.ts')
+    await unstageReviewFile('a.ts')
+    await confirmRevert()
+    expect(review.stage).not.toHaveBeenCalled()
+    expect(review.unstage).not.toHaveBeenCalled()
+    expect(review.revert).not.toHaveBeenCalled()
+    expect($reviewScopeCwd.get()).toBeNull()
+    expect($reviewRevertTarget.get()).toBeUndefined()
+    expect($reviewFiles.get()).toEqual([])
+    $connection.set(null)
+  })
+
   it('is a no-op that clears state when the pane is closed', async () => {
     const review = stubReview()
     $reviewOpen.set(false)
@@ -193,6 +348,78 @@ describe('$reviewMaxChurn', () => {
 })
 
 describe('selectReviewFile / clearReviewSelection', () => {
+  it.each(['resolve', 'reject'])('discards diff %s and finally after config invalidation', async outcome => {
+    let resolve!: (value: string) => void
+    let reject!: (error: Error) => void
+    stubReview({
+      diff: vi.fn(
+        () =>
+          new Promise<string>((done, fail) => {
+            resolve = done
+            reject = fail
+          })
+      )
+    })
+    const pending = selectReviewFile(file('a.ts'))
+    projectFilesystemConfigWritten()
+    setProjectFilesystemScope('local')
+    $reviewSelectedPath.set('a.ts')
+    $reviewDiff.set('current diff')
+    $reviewDiffLoading.set(true)
+
+    if (outcome === 'resolve') {
+      resolve('stale diff')
+    } else {
+      reject(new Error('stale failure'))
+    }
+
+    await pending
+    expect($reviewDiff.get()).toBe('current diff')
+    expect($reviewDiffLoading.get()).toBe(true)
+  })
+  it.each(['resolve', 'reject'])('ignores an old-profile diff %s for the same relative path', async outcome => {
+    let resolveOld!: (value: string) => void
+    let rejectOld!: (error: Error) => void
+    let resolveNew!: (value: string) => void
+    stubReview({
+      diff: vi.fn(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            resolveOld = resolve
+            rejectOld = reject
+          })
+      )
+    })
+    const oldRequest = selectReviewFile(file('a.ts'))
+    $gatewayActivationGeneration.set($gatewayActivationGeneration.get() + 1)
+    stubReview({
+      diff: vi.fn(
+        () =>
+          new Promise<string>(resolve => {
+            resolveNew = resolve
+          })
+      )
+    })
+    openReview('/repo')
+    await Promise.resolve()
+    const newRequest = selectReviewFile(file('a.ts'))
+    $reviewDiff.set('profile B')
+
+    if (outcome === 'resolve') {
+      resolveOld('profile A')
+    } else {
+      rejectOld(new Error('old failure'))
+    }
+
+    await oldRequest
+    expect($reviewDiff.get()).toBe('profile B')
+    expect($reviewDiffLoading.get()).toBe(true)
+    resolveNew('new diff')
+    await newRequest
+    expect($reviewDiff.get()).toBe('new diff')
+    expect($reviewDiffLoading.get()).toBe(false)
+  })
+
   it('sets the selected path and fetches its diff', async () => {
     const review = stubReview({ diff: vi.fn(async () => 'the diff') })
 
@@ -322,6 +549,17 @@ describe('view state', () => {
     expect($reviewDiff.get()).toBeNull()
   })
 
+  it('keeps a pinned diff visible when the main session changes', async () => {
+    stubReview({ list: vi.fn(async () => ({ files: [file('tile.ts')] })), diff: vi.fn(async () => 'tile diff') })
+    openReview('/tile')
+    await Promise.resolve()
+    await selectReviewFile(file('tile.ts'))
+    $selectedStoredSessionId.set('another-main-session')
+    expect($reviewScopeCwd.get()).toBe('/tile')
+    expect($reviewFiles.get()).toEqual([file('tile.ts')])
+    expect($reviewDiff.get()).toBe('tile diff')
+  })
+
   it('scoped pane ignores main-pane cwd changes', async () => {
     const review = stubReview({
       list: vi.fn(async (cwd: string) => ({ files: [file(cwd === '/tile' ? 'tile.ts' : 'main.ts')] }))
@@ -343,6 +581,40 @@ describe('view state', () => {
 })
 
 describe('mutations', () => {
+  it.each(['stage', 'unstage', 'revert', 'commit', 'push'] as const)(
+    'does not refresh a new profile after pending %s completes',
+    async operation => {
+      let resolve!: () => void
+
+      const review = stubReview({
+        [operation]: vi.fn(
+          () =>
+            new Promise<void>(done => {
+              resolve = done
+            })
+        )
+      })
+
+      const actions = {
+        stage: () => stageReviewFile('a.ts'),
+        unstage: () => unstageReviewFile('a.ts'),
+        revert: () => revertReviewFile('a.ts'),
+        commit: () => commitChanges('message'),
+        push: () => pushChanges()
+      }
+
+      const pending = actions[operation]()
+      $gatewayActivationGeneration.set($gatewayActivationGeneration.get() + 1)
+      openReview('/repo')
+      await Promise.resolve()
+      review.list.mockClear()
+      review.shipInfo.mockClear()
+      resolve()
+      await pending
+      expect(review.list).not.toHaveBeenCalled()
+      expect(review.shipInfo).not.toHaveBeenCalled()
+    }
+  )
   it('stageReviewFile forwards the path and re-syncs', async () => {
     const review = stubReview()
     $reviewOpen.set(true) // afterMutation's refreshReview only lists when the pane is open
@@ -404,6 +676,36 @@ describe('revert confirm dialog', () => {
 })
 
 describe('ship flow', () => {
+  it('discards createPr continuation after crossing profiles', async () => {
+    let resolve!: (value: { url: string }) => void
+
+    const review = stubReview({
+      createPr: vi.fn(
+        () =>
+          new Promise<{ url: string }>(done => {
+            resolve = done
+          })
+      )
+    })
+
+    $sessions.set([{ id: 'a', git_repo_root: '/repo' }] as never)
+    $selectedStoredSessionId.set('a')
+    vi.mocked(stampSessionPrBranch).mockClear()
+    const pending = createOrOpenPr()
+    $gatewayActivationGeneration.set($gatewayActivationGeneration.get() + 1)
+    $sessions.set([{ id: 'b', git_repo_root: '/repo' }] as never)
+    $selectedStoredSessionId.set('b')
+    openReview('/repo')
+    await Promise.resolve()
+    review.shipInfo.mockClear()
+    $reviewShipBusy.set(true)
+    resolve({ url: 'https://example.com/old-pr' })
+    await pending
+    expect(stampSessionPrBranch).not.toHaveBeenCalled()
+    expect(window.hermesDesktop?.openExternal).not.toHaveBeenCalled()
+    expect(review.shipInfo).not.toHaveBeenCalled()
+    expect($reviewShipBusy.get()).toBe(true)
+  })
   it('commitChanges commits the trimmed message and toggles the busy flag', async () => {
     const review = stubReview()
     const seen: boolean[] = []
@@ -524,6 +826,201 @@ describe('generateCommitMessage', () => {
 
     expect(msg).toBe('')
   })
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+
+  return { promise, resolve, reject }
+}
+
+const ownerChanges = {
+  config: () => {
+    projectFilesystemConfigWritten()
+  },
+  'config roundtrip': () => {
+    projectFilesystemConfigWritten()
+    setProjectFilesystemScope('local')
+  },
+  cwd: () => {
+    $currentCwd.set('/other')
+    $currentCwd.set('/repo')
+  },
+  scope: () => {
+    $reviewScopeCwd.set('/other')
+    $reviewScopeCwd.set(null)
+  },
+  target: () => {
+    $reviewScopeTarget.set('tile:other')
+    $reviewScopeTarget.set('main')
+  },
+  session: () => {
+    const id = $selectedStoredSessionId.get()
+    $selectedStoredSessionId.set('other')
+    $selectedStoredSessionId.set(id)
+  }
+}
+
+describe.each(Object.entries(ownerChanges))('review owner invalidation: %s', (_name, changeOwner) => {
+  it.each(['resolve', 'reject'])('does not revive diff %s or its finally', async outcome => {
+    const result = deferred<string>()
+    stubReview({ diff: vi.fn(() => result.promise) })
+    const pending = selectReviewFile(file('a.ts'))
+    changeOwner()
+    $reviewSelectedPath.set('a.ts')
+    $reviewDiff.set('current diff')
+    $reviewDiffLoading.set(true)
+
+    if (outcome === 'resolve') {
+      result.resolve('stale diff')
+    } else {
+      result.reject(new Error('stale failure'))
+    }
+
+    await pending
+    expect($reviewDiff.get()).toBe('current diff')
+    expect($reviewDiffLoading.get()).toBe(true)
+  })
+
+  it('does not open or stamp a stale PR or clear current busy state', async () => {
+    const result = deferred<{ url: string }>()
+    const review = stubReview({ createPr: vi.fn(() => result.promise) })
+    $sessions.set([{ id: 'a', git_repo_root: '/repo' }] as never)
+    $selectedStoredSessionId.set('a')
+    vi.mocked(stampSessionPrBranch).mockClear()
+    const pending = createOrOpenPr()
+    changeOwner()
+    await Promise.resolve()
+    review.shipInfo.mockClear()
+    $reviewShipBusy.set(true)
+    result.resolve({ url: 'https://example.com/stale' })
+    await pending
+    expect(window.hermesDesktop?.openExternal).not.toHaveBeenCalled()
+    expect(stampSessionPrBranch).not.toHaveBeenCalled()
+    expect(review.shipInfo).not.toHaveBeenCalled()
+    expect($reviewShipBusy.get()).toBe(true)
+  })
+
+  it.each(['resolve', 'reject'])('does not publish ship info %s after owner moves while closed', async outcome => {
+    const result = deferred<HermesReviewShipInfo>()
+    stubReview({ shipInfo: vi.fn(() => result.promise) })
+    const pending = refreshShipInfo()
+    changeOwner()
+    const current = { ghReady: true, pr: { url: 'https://example.com/current' } } as HermesReviewShipInfo
+    $reviewShipInfo.set(current)
+
+    if (outcome === 'resolve') {
+      result.resolve({ ghReady: false, pr: null })
+    } else {
+      result.reject(new Error('stale ship info failure'))
+    }
+
+    await pending
+    expect($reviewShipInfo.get()).toEqual(current)
+  })
+
+  it('abandons commit-message context when ownership changes', async () => {
+    const result = deferred<{ diff: string; recent: string }>()
+    stubReview({ commitContext: vi.fn(() => result.promise) })
+    const pending = generateCommitMessage()
+    changeOwner()
+    $reviewCommitMsgBusy.set(true)
+    result.resolve({ diff: 'stale diff', recent: 'stale history' })
+    expect(await pending).toBe('')
+    expect(requestOneShot).not.toHaveBeenCalled()
+    expect($reviewCommitMsgBusy.get()).toBe(true)
+  })
+
+  it.each(['resolve', 'reject'])('does not publish list %s or finally after owner moves', async outcome => {
+    const result = deferred<{ files: HermesReviewFile[] }>()
+    stubReview({ list: vi.fn(() => result.promise) })
+    $reviewOpen.set(true)
+    const pending = refreshReview()
+    changeOwner()
+    $reviewFiles.set([file('current.ts')])
+    $reviewLoading.set(true)
+
+    if (outcome === 'resolve') {
+      result.resolve({ files: [file('stale.ts')] })
+    } else {
+      result.reject(new Error('stale list failure'))
+    }
+
+    await pending
+    expect($reviewFiles.get()).toEqual([file('current.ts')])
+    expect($reviewLoading.get()).toBe(true)
+  })
+
+  it.each(['stage', 'unstage', 'revert', 'commit'] as const)(
+    'does not continue %s after its list refresh loses ownership',
+    async operation => {
+      const result = deferred<{ files: HermesReviewFile[] }>()
+      const review = stubReview({ list: vi.fn(() => result.promise) })
+      $reviewOpen.set(true)
+
+      const actions = {
+        stage: () => stageReviewFile('a.ts'),
+        unstage: () => unstageReviewFile('a.ts'),
+        revert: () => revertReviewFile('a.ts'),
+        commit: () => commitChanges('message')
+      }
+
+      const pending = actions[operation]()
+      await Promise.resolve()
+      expect(review.list).toHaveBeenCalled()
+      changeOwner()
+      await Promise.resolve()
+      $reviewSelectedPath.set('a.ts')
+      $reviewFiles.set([file('current.ts')])
+      $reviewLoading.set(true)
+      review.shipInfo.mockClear()
+      vi.mocked(refreshRepoStatus).mockClear()
+      result.resolve({ files: [file('a.ts')] })
+      await pending
+      expect($reviewFiles.get()).toEqual([file('current.ts')])
+      expect($reviewLoading.get()).toBe(true)
+      expect(review.diff).not.toHaveBeenCalled()
+      expect(review.shipInfo).not.toHaveBeenCalled()
+      expect(refreshRepoStatus).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['stage', 'unstage', 'revert', 'commit', 'push'] as const)(
+    'does not run refresh continuations after pending %s',
+    async operation => {
+      const result = deferred<void>()
+      const review = stubReview({ [operation]: vi.fn(() => result.promise) })
+      $reviewOpen.set(true)
+
+      const actions = {
+        stage: () => stageReviewFile('a.ts'),
+        unstage: () => unstageReviewFile('a.ts'),
+        revert: () => revertReviewFile('a.ts'),
+        commit: () => commitChanges('message'),
+        push: pushChanges
+      }
+
+      const pending = actions[operation]()
+      changeOwner()
+      await Promise.resolve()
+      review.list.mockClear()
+      review.shipInfo.mockClear()
+      vi.mocked(refreshRepoStatus).mockClear()
+      $reviewShipBusy.set(true)
+      result.resolve()
+      await pending
+      expect(review.list).not.toHaveBeenCalled()
+      expect(review.shipInfo).not.toHaveBeenCalled()
+      expect(refreshRepoStatus).not.toHaveBeenCalled()
+      expect($reviewShipBusy.get()).toBe(true)
+    }
+  )
 })
 
 describe('$reviewCommitDefault', () => {

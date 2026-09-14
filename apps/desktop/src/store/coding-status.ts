@@ -2,6 +2,10 @@ import { atom, computed, type ReadableAtom } from 'nanostores'
 
 import type { HermesGitWorktree, HermesRepoStatus } from '@/global'
 import { desktopGit } from '@/lib/desktop-git'
+import {
+  projectFilesystemConfigGeneration,
+  projectFilesystemIsLocal
+} from '@/lib/project-filesystem-capability'
 
 import {
   $projectScope,
@@ -9,6 +13,8 @@ import {
   $worktreeDialog,
   $worktreeRefreshToken,
   ALL_PROJECTS,
+  captureProjectPathContext,
+  projectFilesystemScope,
   projectRootCwd
 } from './projects'
 import {
@@ -33,7 +39,7 @@ import { $workspaceChangeTick } from './workspace-events'
 
 const REPO_STATUS_REFRESH_DEBOUNCE_MS = 100
 
-const normalizeCwd = (cwd?: null | string): null | string => cwd?.trim() || null
+const normalizeCwd = (cwd?: null | string): null | string => (cwd?.trim() ? cwd : null)
 
 const EMPTY_WORKTREES: HermesGitWorktree[] = []
 
@@ -498,6 +504,12 @@ export function _resetCodingStatusForTests(): void {
 // repo is in reach. That is a no-op and not an error, because a worktree only
 // exists inside a repo.
 export async function resolveWorktreeRepoPath(): Promise<string> {
+  const context = captureProjectPathContext()
+
+  if (!context || (await projectFilesystemScope(context)) !== 'local') {
+    return ''
+  }
+
   const runtimeId = $focusedRuntimeId.get()
   const scope = $projectScope.get()
 
@@ -507,7 +519,7 @@ export async function resolveWorktreeRepoPath(): Promise<string> {
   ]
 
   for (const candidate of candidates) {
-    const path = candidate.trim()
+    const path = candidate.trim() ? candidate : ''
 
     if (path && (await isGitRepoPath(path))) {
       return path
@@ -518,9 +530,21 @@ export async function resolveWorktreeRepoPath(): Promise<string> {
 }
 
 export async function openWorktreeDialog(options?: { base?: string; repoPath?: string }): Promise<void> {
-  const repoPath = options?.repoPath?.trim() || (await resolveWorktreeRepoPath())
+  if (!projectFilesystemIsLocal()) {
+    $worktreeDialog.set(null)
 
-  if (repoPath) {
+    return
+  }
+
+  const capabilityGeneration = projectFilesystemConfigGeneration()
+  const requestedPath = options?.repoPath ?? ''
+  const repoPath = (requestedPath.trim() ? requestedPath : '') || (await resolveWorktreeRepoPath())
+
+  if (
+    repoPath &&
+    projectFilesystemIsLocal() &&
+    projectFilesystemConfigGeneration() === capabilityGeneration
+  ) {
     $worktreeDialog.set({ base: options?.base, repoPath })
   }
 }

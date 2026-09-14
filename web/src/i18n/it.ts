@@ -776,6 +776,8 @@ export const it: Translations = {
       "Il percorso assoluto viene risolto al salvataggio nell’ambiente terminale del profilo della richiesta.",
     projectDirectoryPending: "Convalida della directory del progetto nell’ambiente terminale…",
     projectDirectoryValidationError: "Convalida della directory del progetto non riuscita: {error}",
+    projectDirectoryOverrideHint: "Le nuove attività la ereditano come area di lavoro predefinita; ogni attività può sostituirla nella finestra di creazione.",
+    saving: "Salvataggio…",
     logTruncated: "(mostrando ultimi 100 KB — log completo in ",
     logAt: ")",
   },

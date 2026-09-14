@@ -711,6 +711,8 @@ export const ar = defineLocale({
       "يُحلّ المسار المطلق في بيئة الطرفية لملف تعريف الطلب هذا عند الحفظ.",
     projectDirectoryPending: "جارٍ التحقق من دليل المشروع في بيئة الطرفية…",
     projectDirectoryValidationError: "فشل التحقق من دليل المشروع: {error}",
+    projectDirectoryOverrideHint: "ترث المهام الجديدة هذا كمساحة العمل الافتراضية، ويمكن لكل مهمة تجاوزه في مربع حوار الإنشاء.",
+    saving: "جارٍ الحفظ…",
     logTruncated: "(عرض آخر 100 كيلوبايت — السجل الكامل في ",
     logAt: ")",
   },

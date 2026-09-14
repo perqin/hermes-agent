@@ -81,7 +81,7 @@ class TestSessionCwdOverride:
 
     def test_nonlocal_session_cwd_is_propagated_without_controller_stat(self, monkeypatch):
         monkeypatch.setattr(rt, "_filesystem_is_local", lambda: False)
-        remote = "/backend-only/project/repo"
+        remote = "/backend-only/project/repo "
         token = set_session_cwd(remote)
         try:
             assert resolve_agent_cwd() == Path(remote)

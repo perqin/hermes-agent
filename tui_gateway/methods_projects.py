@@ -185,7 +185,9 @@ def _(rid, params, pdb, conn) -> dict:
     from tools.terminal_tool import acquire_terminal_environment
 
     with _project_runtime_scope() as operation_scope:
-        raw = str(params.get("cwd") or "").strip()
+        raw = str(params.get("cwd") or "")
+        if not raw.strip():
+            return _ok(rid, {"project": None, "branch": "", "cwd": ""})
         try:
             env = acquire_terminal_environment(operation_scope=operation_scope)
         except Exception:

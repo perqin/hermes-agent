@@ -400,16 +400,33 @@ def _set_toggle(rid, params, key, value, session):
     return _kv(rid, key, report(nv))
 
 
+@_cfgset_guarded
 def _set_cwd(rid, params, key, value, session):
-    raw = str(value or "").strip()
-    if not raw:
+    raw = str(value or "")
+    if not raw.strip():
         return _err(rid, 4002, "cwd required")
-    cwd = os.path.abspath(os.path.expanduser(raw))
-    if not os.path.isdir(cwd):
-        return _err(rid, 4002, f"working directory does not exist: {raw}")
+    with _project_runtime_scope() as operation_scope:
+        from hermes_cli.project_paths import resolve_project_folder
+        from tools.terminal_tool import acquire_terminal_environment
+
+        env = acquire_terminal_environment(operation_scope=operation_scope)
+        filesystem_local = getattr(env, "is_local", False) is True
+        if filesystem_local:
+            from hermes_constants import translate_cwd_for_wsl_backend
+
+            cwd = os.path.abspath(os.path.expanduser(translate_cwd_for_wsl_backend(raw)))
+            if not os.path.isdir(cwd):
+                return _err(rid, 4002, f"working directory does not exist: {raw}")
+        else:
+            cwd = resolve_project_folder(
+                raw, operation_scope=operation_scope, environment=env)
     _write_config_key("terminal.cwd", cwd)
-    os.environ["TERMINAL_CWD"] = cwd
-    return _kv(rid, "terminal.cwd", cwd, cwd=cwd, branch=git_probe.branch(cwd))
+    if _profile_home(params.get("profile")) is None:
+        os.environ["TERMINAL_CWD"] = cwd
+    return _kv(
+        rid, "terminal.cwd", cwd, cwd=cwd,
+        branch=git_probe.branch(cwd) if filesystem_local else "",
+    )
 
 
 @_cfgset_guarded

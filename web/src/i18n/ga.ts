@@ -785,6 +785,8 @@ export const ga: Translations = {
       "Réitítear an chonair absalóideach i dtimpeallacht teirminéil phróifíl na hiarrata seo agus í á sábháil.",
     projectDirectoryPending: "Comhadlann an tionscadail á bailíochtú sa timpeallacht teirminéil…",
     projectDirectoryValidationError: "Theip ar bhailíochtú chomhadlann an tionscadail: {error}",
+    projectDirectoryOverrideHint: "Faigheann tascanna nua é seo mar a spás oibre réamhshocraithe; is féidir le gach tasc é a shárú sa dialóg chruthaithe.",
+    saving: "Á shábháil…",
     logTruncated: "(taispeántar an 100 KB deireanach — loga iomlán ag ",
     logAt: ")",
   },

@@ -776,6 +776,8 @@ export const ja: Translations = {
       "保存時に、このリクエストプロファイルのターミナル環境で絶対パスが解決されます。",
     projectDirectoryPending: "ターミナル環境でプロジェクトディレクトリを検証しています…",
     projectDirectoryValidationError: "プロジェクトディレクトリの検証に失敗しました: {error}",
+    projectDirectoryOverrideHint: "新しいタスクはこれを既定のワークスペースとして継承します。各タスクは作成ダイアログで上書きできます。",
+    saving: "保存中…",
     logTruncated: "（最後の 100 KB を表示中 — 完全なログは ",
     logAt: "）",
   },

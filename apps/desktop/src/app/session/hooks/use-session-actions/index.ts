@@ -234,7 +234,7 @@ function branchCreateKey({
   return JSON.stringify({
     branchCount: branchCount ?? null,
     connectionId: ownerRoute?.connectionId || null,
-    cwd: cwd?.trim() || null,
+    cwd: cwd?.trim() ? cwd : null,
     messages: sourceSessionId ? null : branchMessagesFingerprint(branchMessages),
     ownerProfile: ownerRoute?.profile || null,
     parentStoredId,
@@ -756,7 +756,13 @@ export function useSessionActions({
         const workspaceScope = options?.workspaceScope ?? { workspaceMode: 'sessions' }
 
         const cwd =
-          options?.cwd === null ? '' : typeof options?.cwd === 'string' ? options.cwd.trim() : resolveNewSessionCwd()
+          options?.cwd === null
+            ? ''
+            : typeof options?.cwd === 'string'
+              ? options.cwd.trim()
+                ? options.cwd
+                : ''
+              : resolveNewSessionCwd()
 
         const params = {
           ...(await desktopSessionCreateParams(cwd, capturedRoute)),
@@ -2379,7 +2385,7 @@ export function useSessionActions({
           branchMessages,
           null,
           stored?.id ?? storedSessionId,
-          stored?.cwd?.trim(),
+          stored?.cwd?.trim() ? stored.cwd : undefined,
           profile,
           undefined,
           ownerRoute

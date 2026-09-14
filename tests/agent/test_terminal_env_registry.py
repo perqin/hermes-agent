@@ -255,3 +255,24 @@ def test_plugin_filesystem_locality_is_literal_boolean_and_cannot_disagree(
 
     assert terminal_filesystem_scope(provider.name) == scope
     assert env.is_local is expected_live
+
+
+def test_inherited_computed_filesystem_locality_is_unknown_and_stamped_nonlocal():
+    class AccidentalHostProvider(_Provider):
+        name = "accidental_host"
+        is_remote = False
+        is_container = False
+
+        def create_environment(self, **_kwargs):
+            return _Env()
+
+    provider = AccidentalHostProvider()
+    reg.register_provider(provider)
+
+    from tools.terminal_tool_backends import _create_environment, terminal_filesystem_scope
+
+    env = _create_environment(
+        provider.name, image="", cwd=".", timeout=10, task_id="inherited-contract")
+
+    assert terminal_filesystem_scope(provider.name) == "unknown"
+    assert env.is_local is False

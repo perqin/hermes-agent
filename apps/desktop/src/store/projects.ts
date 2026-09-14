@@ -10,6 +10,7 @@ import type { HermesGitBaseBranch, HermesGitBranch } from '@/global'
 import { getHermesConfig, hermesApi, type HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
 import {
+  cancelDesktopFsRemotePicker,
   captureDesktopFsWriteRoute,
   desktopDefaultCwd,
   type DesktopFsWriteRoute,
@@ -19,9 +20,22 @@ import {
 } from '@/lib/desktop-fs'
 import { desktopGit } from '@/lib/desktop-git'
 import { isMissingRestEndpoint, isMissingRpcMethod } from '@/lib/gateway-rpc'
-import { isUnderPath } from '@/lib/path-compare'
+import { isUnderPath, joinPath } from '@/lib/path-compare'
 import { persistentAtom } from '@/lib/persisted'
-import { $gateway, activeGateway, ensureActiveGatewayOpen, gatewayActivationEpoch } from '@/store/gateway'
+import {
+  onProjectFilesystemCapabilityInvalidated,
+  projectFilesystemConfigGeneration,
+  projectFilesystemConfigWritten,
+  projectFilesystemIsLocal,
+  setProjectFilesystemScope
+} from '@/lib/project-filesystem-capability'
+import {
+  $gateway,
+  $gatewayActivationGeneration,
+  activeGateway,
+  ensureActiveGatewayOpen,
+  gatewayActivationEpoch
+} from '@/store/gateway'
 import { $sidebarShowAllSessions, setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
 import {
@@ -97,13 +111,14 @@ export const $projectScope = persistentAtom<string>(PROJECT_SCOPE_KEY, ALL_PROJE
 // (best-effort — the durable pointer is nice-to-have, the view scope is the
 // point). Never opens a session.
 export function enterProject(id: string): void {
+  const context = captureProjectPathContext()
   $projectScope.set(id)
 
   // Only explicit, persisted projects (ids are `p_<hex>`) become active. Auto
   // projects (ids are filesystem paths) and the Home bucket have no durable row
   // to pin, so they're view-scope only.
   if (id.startsWith('p_')) {
-    void setActiveProject(id).catch(() => undefined)
+    void setActiveProject(id, context ?? undefined).catch(() => undefined)
   }
 }
 
@@ -115,8 +130,13 @@ export function exitProjectScope(): void {
 // one. Empty for the path-less Home bucket. (The sidebar's `projectTreeCwd` is
 // the same rule over the same tree — this is the store-side copy so the store
 // doesn't reach into the sidebar's React module.)
-export const projectRootCwd = (project: SidebarProjectTree | undefined): string =>
-  (project?.path || project?.repos.find(repo => repo.path)?.path || '').trim()
+const nonblankPath = (path: string): string => (path.trim() ? path : '')
+
+export const projectRootCwd = (project: SidebarProjectTree | undefined): string => {
+  const cwd = project?.path || project?.repos.find(repo => repo.path)?.path || ''
+
+  return nonblankPath(cwd)
+}
 
 // ⌘K "go to project": flip the sidebar into grouped mode and enter the project
 // — a pure scope switch, same as clicking the overview row (never spends main).
@@ -189,7 +209,7 @@ export function projectIdForCwd(cwd: string): null | string {
     const paths = [project.path, ...project.repos.flatMap(repo => [repo.path, ...repo.groups.map(group => group.path)])]
 
     for (const path of paths) {
-      const p = (path || '').trim()
+      const p = nonblankPath(path || '')
 
       if (p && isUnderPath(p, cwd) && p.length > bestLen) {
         bestLen = p.length
@@ -210,7 +230,7 @@ export function projectIdForCwd(cwd: string): null | string {
 // only resolves projects.db rows, so the desktop and TUI name the same session
 // identically without threading a second per-session copy through session.info.
 export function projectNameForCwd(cwd: string): null | string {
-  const target = (cwd || '').trim()
+  const target = nonblankPath(cwd || '')
 
   if (!target) {
     return null
@@ -227,7 +247,7 @@ export function projectNameForCwd(cwd: string): null | string {
     const paths = [project.path, ...project.repos.flatMap(repo => [repo.path, ...repo.groups.map(group => group.path)])]
 
     for (const path of paths) {
-      const p = (path || '').trim()
+      const p = nonblankPath(path || '')
 
       if (p && isUnderPath(p, target) && p.length > bestLen) {
         bestLen = p.length
@@ -246,7 +266,7 @@ export function projectNameForCwd(cwd: string): null | string {
 // (from the overview or a now-stale project alike). Caller gates this on a real
 // same-session cwd move, so a plain session switch never reaches here.
 export async function followActiveSessionCwd(cwd: string): Promise<void> {
-  const target = cwd.trim()
+  const target = nonblankPath(cwd)
 
   if (!target) {
     return
@@ -322,7 +342,19 @@ interface ActiveProjectsContext {
   profile: string
 }
 
+function captureProjectFsRoute(profile: string): DesktopFsWriteRoute {
+  const captured = captureDesktopFsWriteRoute()
+  const remote = isDesktopFsRemoteMode()
+
+  return {
+    ...(remote && captured.connectionId ? { connectionId: captured.connectionId } : {}),
+    profile,
+    remote
+  }
+}
+
 export interface ProjectPathContext extends ActiveProjectsContext {
+  configGeneration: number
   fsWriteRoute?: DesktopFsWriteRoute
   generation: number
   remoteConnection: boolean
@@ -360,9 +392,10 @@ export function captureProjectPathContext(): ProjectPathContext | null {
 
   return {
     gateway,
-    fsWriteRoute: captureDesktopFsWriteRoute(),
+    fsWriteRoute: captureProjectFsRoute(profile),
     generation: gatewayActivationEpoch(),
     profile,
+    configGeneration: projectFilesystemConfigGeneration(),
     remoteConnection: isDesktopFsRemoteMode()
   }
 }
@@ -377,7 +410,7 @@ function projectPathContextIsCurrent(context: ProjectPathContext): boolean {
 
 async function resolveProjectPathContext(context?: ProjectPathContext): Promise<ProjectPathContext> {
   if (context) {
-    if (!projectPathContextIsCurrent(context)) {
+    if (!projectPathContextIsCurrent(context) || context.configGeneration !== projectFilesystemConfigGeneration()) {
       throw new Error('Active Hermes profile changed while choosing a project folder')
     }
 
@@ -389,7 +422,8 @@ async function resolveProjectPathContext(context?: ProjectPathContext): Promise<
 
   return {
     ...active,
-    fsWriteRoute: captureDesktopFsWriteRoute(),
+    configGeneration: projectFilesystemConfigGeneration(),
+    fsWriteRoute: captureProjectFsRoute(profile),
     generation: gatewayActivationEpoch(),
     remoteConnection: isDesktopFsRemoteMode()
   }
@@ -400,9 +434,19 @@ let projectCapabilityRevision = 0
 
 /** Terminal configuration can change without changing gateway/profile/epoch. */
 export function invalidateProjectFilesystemCapabilities(): void {
+  projectFilesystemConfigWritten()
+}
+
+function clearProjectFilesystemCapabilityState(): void {
   projectCapabilityRevision += 1
   projectCapabilityCache = new WeakMap()
+  setProjectFilesystemScope('unknown')
+  $projectDialog.set(null)
+  $worktreeDialog.set(null)
+  cancelDesktopFsRemotePicker?.()
 }
+
+onProjectFilesystemCapabilityInvalidated(clearProjectFilesystemCapabilityState)
 
 export async function projectFilesystemScope(context: ProjectPathContext): Promise<ProjectFilesystemScope> {
   if (!projectPathContextIsCurrent(context)) {
@@ -450,6 +494,8 @@ export async function projectFilesystemScope(context: ProjectPathContext): Promi
   if (!projectPathContextIsCurrent(context)) {
     throw new Error('Active Hermes profile changed while choosing a project folder')
   }
+
+  setProjectFilesystemScope(scope)
 
   return scope
 }
@@ -693,7 +739,7 @@ export async function moveSessionToProject(
     ...(profile ? { profile } : {})
   })
 
-  const moved = res.cwd?.trim()
+  const moved = typeof res.cwd === 'string' && res.cwd.trim() ? res.cwd : ''
 
   if (!moved) {
     throw new Error('Session move did not return a canonical workspace')
@@ -759,6 +805,18 @@ function syncReposScanning(): void {
 $gateway.subscribe(syncReposScanning)
 
 export async function scanAndRecordRepos(force = false): Promise<void> {
+  let context: ProjectPathContext
+
+  try {
+    context = await resolveProjectPathContext()
+
+    if ((await projectFilesystemScope(context)) !== 'local') {
+      return
+    }
+  } catch {
+    return
+  }
+
   if (isDesktopFsRemoteMode()) {
     // On a remote backend the desktop can't crawl the host filesystem.
     // Ask the host to scan its own discovery roots (`projects.discover_repos`
@@ -766,8 +824,6 @@ export async function scanAndRecordRepos(force = false): Promise<void> {
     // sessions still surface, then refresh the tree so the sidebar picks up
     // the merged session-derived + scanned list.
     try {
-      const context = await activeProjectsContext()
-
       const discovered = await gatewayRequestOn<{
         repos?: unknown
         discovery_policy?: unknown
@@ -798,14 +854,6 @@ export async function scanAndRecordRepos(force = false): Promise<void> {
       markProjectsRpcFailure(err)
     }
 
-    return
-  }
-
-  let context: ActiveProjectsContext
-
-  try {
-    context = await activeProjectsContext()
-  } catch {
     return
   }
 
@@ -929,7 +977,7 @@ async function writeProjectIdea(
   folder: null | string | undefined,
   idea: string
 ): Promise<void> {
-  const dir = (folder || '').trim()
+  const dir = folder?.trim() ? folder : ''
   const body = idea.trim()
 
   if (!dir || !body) {
@@ -945,11 +993,7 @@ async function writeProjectIdea(
       return
     }
 
-    await writeDesktopFileText(
-      `${dir.replace(/[/\\]+$/, '')}/IDEA.md`,
-      body.endsWith('\n') ? body : `${body}\n`,
-      context.fsWriteRoute
-    )
+    await writeDesktopFileText(joinPath(dir, 'IDEA.md'), body.endsWith('\n') ? body : `${body}\n`, context.fsWriteRoute)
   } catch {
     // Best-effort: the project is created regardless of whether IDEA.md lands.
   }
@@ -990,6 +1034,7 @@ async function persistOrRollback(
     if (shouldRollback()) {
       restoreProjects(snap)
     }
+
     throw err
   }
 }
@@ -1032,7 +1077,13 @@ function applyAuthoritativeProject(project: ProjectInfo): void {
     tree.some(node => node.id === project.id)
       ? tree.map(node =>
           node.id === project.id
-            ? { ...node, color: project.color, icon: project.icon, label: project.name || project.id, path: canonicalPath }
+            ? {
+                ...node,
+                color: project.color,
+                icon: project.icon,
+                label: project.name || project.id,
+                path: canonicalPath
+              }
             : node
         )
       : [projectInfoToTreeNode(project), ...tree]
@@ -1050,9 +1101,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
   try {
     // All profiles filters the sidebar, not the owner of a new project.
     // Capture the live route so reconnecting cannot retarget the write.
-    context = input.context
-      ? await resolveProjectPathContext(input.context)
-      : await resolveProjectPathContext()
+    context = input.context ? await resolveProjectPathContext(input.context) : await resolveProjectPathContext()
 
     res = await gatewayRequestOn<{ project: ProjectInfo | null }>(
       context.gateway,
@@ -1126,8 +1175,8 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
   return created
 }
 
-export async function renameProject(id: string, name: string): Promise<void> {
-  await updateProject(id, { name })
+export async function renameProject(id: string, name: string, context?: ProjectPathContext): Promise<void> {
+  await updateProject(id, { name }, context)
 }
 
 // Patch top-level project fields (name / appearance). Optimistic: the cached
@@ -1135,8 +1184,10 @@ export async function renameProject(id: string, name: string): Promise<void> {
 // lag; only a failed write reconciles from the server.
 export async function updateProject(
   id: string,
-  patch: { name?: string; color?: null | string; icon?: null | string }
+  patch: { name?: string; color?: null | string; icon?: null | string },
+  captured?: ProjectPathContext
 ): Promise<void> {
+  const context = await resolveProjectPathContext(captured)
   const snap = snapshotProjects()
 
   $projectTree.set(
@@ -1155,16 +1206,23 @@ export async function updateProject(
 
   // Backend treats null/undefined as "leave unchanged"; "" clears (stores NULL).
   // Map explicit null → "" so "no color"/"no icon" actually clear.
-  await persistOrRollback(snap, () =>
-    gatewayRequest(
-      'projects.update',
-      projectParams({
-        id,
-        ...patch,
-        ...(patch.color === null && { color: '' }),
-        ...(patch.icon === null && { icon: '' })
-      })
-    )
+  await persistOrRollback(
+    snap,
+    () =>
+      gatewayRequestOn(
+        context.gateway,
+        'projects.update',
+        projectParams(
+          {
+            id,
+            ...patch,
+            ...(patch.color === null && { color: '' }),
+            ...(patch.icon === null && { icon: '' })
+          },
+          context.profile
+        )
+      ),
+    () => projectPathContextIsCurrent(context)
   )
 }
 
@@ -1178,8 +1236,10 @@ export async function setProjectAppearance(
   project: Pick<SidebarProjectTree, 'color' | 'icon' | 'id' | 'isAuto' | 'label' | 'path'>,
   patch: { color?: null | string; icon?: null | string }
 ): Promise<boolean> {
+  const context = await resolveProjectPathContext()
+
   if (!project.isAuto) {
-    await updateProject(project.id, patch)
+    await updateProject(project.id, patch, context)
 
     return false
   }
@@ -1189,6 +1249,7 @@ export async function setProjectAppearance(
   }
 
   await createProject({
+    context,
     name: project.label,
     folders: [project.path],
     primaryPath: project.path,
@@ -1207,7 +1268,7 @@ export async function addProjectFolder(
 ): Promise<void> {
   const context = opts.context ? await resolveProjectPathContext(opts.context) : await resolveProjectPathContext()
   const snap = snapshotProjects()
-  const trimmed = path.trim()
+  const trimmed = nonblankPath(path)
 
   // Optimistic: append the folder to the cached project + reflect a primary-path
   // change on its tree node, so the dialog closes onto an updated row. The folder
@@ -1280,7 +1341,8 @@ function openSessionBelongsToProject(projectId: string, projects: ProjectInfo[])
 // Optimistic: drop the project from the cached tree + list the instant it's
 // clicked (the entered-scope effect exits if you deleted the project you were
 // inside), reconciling from the server payload. A failed delete restores both.
-export async function deleteProject(id: string): Promise<void> {
+export async function deleteProject(id: string, captured?: ProjectPathContext): Promise<void> {
+  const context = await resolveProjectPathContext(captured)
   const snap = snapshotProjects()
   // Capture membership BEFORE removal — the project's folders (which determine
   // ownership) are gone once it's dropped from the cache.
@@ -1299,15 +1361,39 @@ export async function deleteProject(id: string): Promise<void> {
     requestFreshSession()
   }
 
-  await persistOrRollback(snap, async () => {
-    applyPayload(await gatewayRequest<ProjectsPayload>('projects.delete', projectParams({ id })))
-  })
-  void refreshProjectTree()
+  await persistOrRollback(
+    snap,
+    async () => {
+      const payload = await gatewayRequestOn<ProjectsPayload>(
+        context.gateway,
+        'projects.delete',
+        projectParams({ id }, context.profile)
+      )
+
+      if (projectPathContextIsCurrent(context)) {
+        applyPayload(payload)
+      }
+    },
+    () => projectPathContextIsCurrent(context)
+  )
+
+  if (projectPathContextIsCurrent(context)) {
+    void refreshProjectTree()
+  }
 }
 
-export async function setActiveProject(id: null | string): Promise<void> {
-  const res = await gatewayRequest<{ active_id: null | string }>('projects.set_active', projectParams({ id }))
-  $activeProjectId.set(res.active_id ?? null)
+export async function setActiveProject(id: null | string, captured?: ProjectPathContext): Promise<void> {
+  const context = await resolveProjectPathContext(captured)
+
+  const res = await gatewayRequestOn<{ active_id: null | string }>(
+    context.gateway,
+    'projects.set_active',
+    projectParams({ id }, context.profile)
+  )
+
+  if (projectPathContextIsCurrent(context)) {
+    $activeProjectId.set(res.active_id ?? null)
+  }
 }
 
 // ── Project management dialog ────────────────────────────────────────────────
@@ -1352,7 +1438,11 @@ export function clearNewProjectDropPlacement(): void {
 }
 
 export function openProjectRename(project: { id: string; name: string }): void {
-  $projectDialog.set({ mode: 'rename', name: project.name, projectId: project.id })
+  const context = captureProjectPathContext()
+
+  if (context) {
+    $projectDialog.set({ context, mode: 'rename', name: project.name, projectId: project.id })
+  }
 }
 
 export function openProjectAddFolder(project: { id: string; name: string }): void {
@@ -1516,6 +1606,33 @@ export interface WorktreeDialogState {
 
 export const $worktreeDialog = atom<null | WorktreeDialogState>(null)
 
+let lastProjectGateway: HermesGateway | null = null
+let lastProjectRouteKey = ''
+
+function syncProjectFilesystemRoute(): void {
+  const gateway = activeGateway()
+  const profile = normalizeProfileKey($activeGatewayProfile.get())
+  const routeKey = gateway ? `${profile}:${gatewayActivationEpoch()}` : ''
+
+  if (gateway === lastProjectGateway && routeKey === lastProjectRouteKey) {
+    return
+  }
+
+  lastProjectGateway = gateway
+  lastProjectRouteKey = routeKey
+  clearProjectFilesystemCapabilityState()
+
+  const context = captureProjectPathContext()
+
+  if (context) {
+    void projectFilesystemScope(context).catch(() => undefined)
+  }
+}
+
+$gateway.subscribe(syncProjectFilesystemRoute)
+$activeGatewayProfile.subscribe(syncProjectFilesystemRoute)
+$gatewayActivationGeneration.subscribe(clearProjectFilesystemCapabilityState)
+
 export function closeWorktreeDialog(): void {
   $worktreeDialog.set(null)
 }
@@ -1523,7 +1640,7 @@ export function closeWorktreeDialog(): void {
 let startWorkToken = 0
 
 export function requestStartWorkSession(path: string, draft?: string, options?: { openTab?: boolean }): void {
-  const target = path.trim()
+  const target = nonblankPath(path)
 
   if (!target) {
     return
@@ -1555,7 +1672,7 @@ export async function removeWorktreePath(
 
 // Reveal a project/worktree path in the OS file manager (git-GUI standard).
 export async function revealPath(path: null | string): Promise<void> {
-  if (path) {
+  if (path && projectFilesystemIsLocal()) {
     await window.hermesDesktop?.revealPath?.(path)
   }
 }
@@ -1578,11 +1695,20 @@ export async function pickProjectFolder(captured?: ProjectPathContext): Promise<
     return null
   }
 
-  const [dir] = await selectDesktopPaths({
-    defaultPath: context.remoteConnection ? (await desktopDefaultCwd())?.cwd : undefined,
-    directories: true,
-    multiple: false
-  })
+  const defaultPath = context.remoteConnection ? (await desktopDefaultCwd(context.fsWriteRoute))?.cwd : undefined
+
+  if (!projectPathContextIsCurrent(context)) {
+    throw new Error('Active Hermes profile changed while choosing a project folder')
+  }
+
+  const [dir] = await selectDesktopPaths(
+    {
+      defaultPath,
+      directories: true,
+      multiple: false
+    },
+    context.fsWriteRoute
+  )
 
   if (!projectPathContextIsCurrent(context)) {
     throw new Error('Active Hermes profile changed while choosing a project folder')
@@ -1633,11 +1759,7 @@ export async function openFolderAsProject(
   let resolved: { cwd: string; project: ProjectInfo | null }
 
   try {
-    resolved = await gatewayRequestOn(
-      context.gateway,
-      'projects.for_cwd',
-      projectParams({ cwd: raw }, context.profile)
-    )
+    resolved = await gatewayRequestOn(context.gateway, 'projects.for_cwd', projectParams({ cwd: raw }, context.profile))
   } catch (error) {
     localFallback(error)
 

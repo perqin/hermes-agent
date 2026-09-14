@@ -39,17 +39,15 @@ class TerminalEnvironmentProvider(ProviderBase):
     * ``session_isolated_when_nonpersistent`` — non-persistent mode gives each session its own
       sandbox identity; opt in when a shared name would let two ephemeral runs destroy each other.
     * ``filesystem_local`` — the environment addresses the controller filesystem. It is
-      declarative so path-entry UIs can query it without creating an environment.
+      declarative so path-entry UIs can query it without creating an environment. Providers
+      must opt in with a literal boolean; the inherited ``None`` is unknown and fails closed.
     """
 
     is_remote: bool = True
     is_container: bool = True
     session_isolated_when_nonpersistent: bool = False
 
-    @property
-    def filesystem_local(self) -> bool:
-        """Whether environments share the controller filesystem (safe legacy default)."""
-        return not self.is_remote and not self.is_container
+    filesystem_local: bool | None = None
 
     @property
     def description(self) -> str:

@@ -777,6 +777,8 @@ export const fr: Translations = {
       "Le chemin absolu est résolu lors de l’enregistrement dans l’environnement de terminal du profil de cette requête.",
     projectDirectoryPending: "Validation du répertoire du projet dans l’environnement de terminal…",
     projectDirectoryValidationError: "Échec de la validation du répertoire du projet : {error}",
+    projectDirectoryOverrideHint: "Les nouvelles tâches l’utilisent comme espace de travail par défaut ; chaque tâche peut le remplacer dans la boîte de dialogue de création.",
+    saving: "Enregistrement…",
     logTruncated: "(affichage des derniers 100 KB — log complet à ",
     logAt: ")",
   },

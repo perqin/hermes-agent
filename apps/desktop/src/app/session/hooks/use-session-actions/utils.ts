@@ -1742,7 +1742,7 @@ export function applyStoredSessionPreviewRuntimeInfo(
   // Only `cwd` is consulted. `git_repo_root` is documented as null for non-git
   // workspaces and not-yet-backfilled history rows, so falling back to it would
   // read as "no workspace" for those sessions and blank a pane that was correct.
-  const storedCwd = stored?.cwd?.trim() || ''
+  const storedCwd = stored?.cwd?.trim() ? stored.cwd : ''
 
   if (storedCwd) {
     setCurrentCwdTransient(storedCwd)

@@ -20,6 +20,20 @@ def test_falls_back_to_cwd_for_non_git_sessions():
     assert workspace_key({"git_repo_root": "", "cwd": "/work/notes"}) == "/work/notes"
 
 
+def test_backend_cwd_suffix_is_preserved_in_workspace_key():
+    assert workspace_key({"cwd": "/work/notes "}) == "/work/notes "
+    assert workspace_key({"cwd": "/work/notes\\"}) == "/work/notes\\"
+
+
+def test_posix_workspace_filter_preserves_literal_backslash():
+    _clause, params = hermes_state_sessions._workspace_key_clause("/work/notes\\")
+
+    assert params[0] == "/work/notes\\"
+    assert params[1] == "/work/notes\\"
+    assert params[2] == "/work/notes\\\\/%"
+    assert len(params) == 3
+
+
 def test_none_when_unbound():
     assert workspace_key({}) is None
     assert workspace_key({"cwd": "", "git_repo_root": ""}) is None

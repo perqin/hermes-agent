@@ -154,7 +154,7 @@ function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
   const p = t.sidebar.projects
   const tree = useStore($projectTree)
   const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
-  const cwd = session?.cwd?.trim() || ''
+  const cwd = session?.cwd?.trim() ? session.cwd : ''
   const currentProjectId = cwd ? projectIdForCwd(cwd) : null
   const targets = tree.filter(node => node.id !== currentProjectId && !node.isNoProject && projectRootCwd(node))
 
@@ -268,11 +268,13 @@ function useSessionActions({
 
               // Read the row lazily: subscribing every row's menu to $sessions
               // would re-render the whole sidebar on each session update.
-              const cwd =
+              const storedCwd =
                 $sessions
                   .get()
                   .find(s => sessionMatchesStoredId(s, sessionId))
-                  ?.cwd?.trim() || undefined
+                  ?.cwd
+
+              const cwd = storedCwd?.trim() ? storedCwd : undefined
 
               void openSessionInTerminal(sessionId, { cwd, profile })
             }

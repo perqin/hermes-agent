@@ -776,6 +776,8 @@ export const ko: Translations = {
       "저장할 때 이 요청 프로필의 터미널 환경에서 절대 경로를 확인합니다.",
     projectDirectoryPending: "터미널 환경에서 프로젝트 디렉터리를 확인하는 중…",
     projectDirectoryValidationError: "프로젝트 디렉터리 확인 실패: {error}",
+    projectDirectoryOverrideHint: "새 작업은 이를 기본 작업 공간으로 상속하며, 각 작업은 만들기 대화 상자에서 변경할 수 있습니다.",
+    saving: "저장 중…",
     logTruncated: "(마지막 100 KB 표시 중 — 전체 로그 위치: ",
     logAt: ")",
   },

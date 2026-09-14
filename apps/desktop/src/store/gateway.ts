@@ -388,6 +388,8 @@ export function isActivePrimary(): boolean {
 }
 
 /** Changes on every active route selection, including same-profile source swaps. */
+export const $gatewayActivationGeneration = atom(0)
+
 export function gatewayActivationEpoch(): number {
   return Number.isFinite(g.activationEpoch) ? g.activationEpoch : 0
 }
@@ -468,6 +470,7 @@ function setActive(profile: string): void {
 
 function beginGatewayActivation(): number {
   g.activationEpoch = gatewayActivationEpoch() + 1
+  $gatewayActivationGeneration.set(g.activationEpoch)
 
   return g.activationEpoch
 }

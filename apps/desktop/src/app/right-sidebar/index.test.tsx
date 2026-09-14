@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesReadDirResult } from '@/global'
+import { setProjectFilesystemScope } from '@/lib/project-filesystem-capability'
 import { $connection, $selectedStoredSessionId, $workspaceCwdOwner, setCurrentCwd } from '@/store/session'
 
 import { resetProjectTreeState } from './files/use-project-tree'
@@ -17,6 +18,7 @@ function installBridge() {
 describe('RightSidebarPane', () => {
   beforeEach(() => {
     $connection.set(null)
+    setProjectFilesystemScope('local')
     $selectedStoredSessionId.set(null)
     $workspaceCwdOwner.set(null)
     resetProjectTreeState()
@@ -27,6 +29,7 @@ describe('RightSidebarPane', () => {
 
   afterEach(() => {
     cleanup()
+    setProjectFilesystemScope('unknown')
     $connection.set(null)
     $selectedStoredSessionId.set(null)
     $workspaceCwdOwner.set(null)

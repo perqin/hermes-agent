@@ -776,6 +776,8 @@ export const de: Translations = {
       "Der absolute Pfad wird beim Speichern in der Terminalumgebung dieses Anfrageprofils aufgelöst.",
     projectDirectoryPending: "Das Projektverzeichnis wird in der Terminalumgebung geprüft…",
     projectDirectoryValidationError: "Die Prüfung des Projektverzeichnisses ist fehlgeschlagen: {error}",
+    projectDirectoryOverrideHint: "Neue Aufgaben übernehmen dies als Standard-Arbeitsbereich; jede Aufgabe kann ihn im Erstellungsdialog überschreiben.",
+    saving: "Wird gespeichert…",
     logTruncated: "(zeige die letzten 100 KB — vollständiges Log unter ",
     logAt: ")",
   },

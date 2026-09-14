@@ -38,13 +38,18 @@ export function projectPathEntryMode(
 }
 
 export interface DesktopFsRemotePicker {
-  selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
+  cancel?: () => void
+  selectPaths: (options?: HermesSelectPathsOptions, route?: DesktopFsWriteRoute) => Promise<string[]>
 }
 
 let remotePicker: DesktopFsRemotePicker | null = null
 
 export function setDesktopFsRemotePicker(next: DesktopFsRemotePicker | null) {
   remotePicker = next
+}
+
+export function cancelDesktopFsRemotePicker(): void {
+  remotePicker?.cancel?.()
 }
 
 function connectionCacheKey(connection: HermesConnection | null) {
@@ -95,18 +100,31 @@ function bridge() {
   return desktop
 }
 
-function remoteFsApi<T>(path: string, body?: Record<string, unknown>): Promise<T> {
-  return hermesApi<T>(
-    body ? { body, method: 'POST', path, profile: desktopFsProfile() } : { path, profile: desktopFsProfile() }
-  )
+function remoteFsApi<T>(
+  path: string,
+  body?: Record<string, unknown>,
+  capturedRoute?: DesktopFsWriteRoute
+): Promise<T> {
+  if (capturedRoute?.remote && !capturedRoute.connectionId) {
+    throw new Error('The captured remote filesystem route is no longer addressable')
+  }
+
+  const route = capturedRoute
+    ? {
+        ...(capturedRoute.connectionId ? { connectionId: capturedRoute.connectionId } : {}),
+        ...(capturedRoute.profile ? { profile: capturedRoute.profile } : {})
+      }
+    : { profile: desktopFsProfile() }
+
+  return hermesApi<T>(body ? { body, method: 'POST', path, ...route } : { path, ...route })
 }
 
-export async function readDesktopDir(path: string): Promise<HermesReadDirResult> {
-  if (!isDesktopFsRemoteMode()) {
+export async function readDesktopDir(path: string, capturedRoute?: DesktopFsWriteRoute): Promise<HermesReadDirResult> {
+  if (!(capturedRoute?.remote ?? isDesktopFsRemoteMode())) {
     return bridge().readDir(path)
   }
 
-  return remoteFsApi<HermesReadDirResult>(fsPath('list', path))
+  return remoteFsApi<HermesReadDirResult>(fsPath('list', path), undefined, capturedRoute)
 }
 
 export async function readDesktopFileText(path: string): Promise<HermesReadFileTextResult> {
@@ -197,12 +215,14 @@ export async function desktopGitRoot(path: string): Promise<string | null> {
   return (await remoteFsApi<{ root: string | null }>(fsPath('git-root', path))).root
 }
 
-export async function desktopDefaultCwd(): Promise<{ branch: string; cwd: string } | null> {
-  if (!isDesktopFsRemoteMode()) {
+export async function desktopDefaultCwd(
+  capturedRoute?: DesktopFsWriteRoute
+): Promise<{ branch: string; cwd: string } | null> {
+  if (!(capturedRoute?.remote ?? isDesktopFsRemoteMode())) {
     return null
   }
 
-  return remoteFsApi<{ branch: string; cwd: string }>('/api/fs/default-cwd')
+  return remoteFsApi<{ branch: string; cwd: string }>('/api/fs/default-cwd', undefined, capturedRoute)
 }
 
 // Reveal a path in the OS file manager (Finder / Explorer / Files). Local only.
@@ -254,12 +274,16 @@ export async function desktopFileDiff(repoRoot: string, filePath: string): Promi
   return git?.fileDiff ? git.fileDiff(repoRoot, filePath) : ''
 }
 
-export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
+export async function selectDesktopPaths(
+  options?: HermesSelectPathsOptions,
+  capturedRoute?: DesktopFsWriteRoute
+): Promise<string[]> {
   const desktop = bridge()
-  const profile = desktopFsProfile()
+  const profile = capturedRoute?.profile ?? desktopFsProfile()
   const localOptions = profile ? { ...options, profile } : options
+  const remote = capturedRoute?.remote ?? isDesktopFsRemoteMode()
 
-  if (!isDesktopFsRemoteMode()) {
+  if (!remote) {
     return desktop.selectPaths(localOptions)
   }
 
@@ -267,5 +291,13 @@ export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Pr
     return desktop.selectPaths(localOptions)
   }
 
-  return remotePicker ? remotePicker.selectPaths({ ...options, multiple: false }) : []
+  if (!remotePicker) {
+    return []
+  }
+
+  const pickerOptions = { ...options, multiple: false }
+
+  return capturedRoute
+    ? remotePicker.selectPaths(pickerOptions, capturedRoute)
+    : remotePicker.selectPaths(pickerOptions)
 }

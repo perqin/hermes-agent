@@ -83,9 +83,9 @@ def project_create(name: str, path: Optional[str] = None, task_id: Optional[str]
         return json.dumps({"success": False, "error": "name is required"})
     from hermes_cli import projects_db as pdb
     from hermes_cli.project_paths import resolve_project_folder
-    folder = (path or "").strip()
+    folder = str(path or "")
     try:
-        if folder:
+        if folder.strip():
             folder = resolve_project_folder(folder, task_id=task_id)
         with pdb.connect_closing() as conn:
             existing = pdb.find_by_primary_path(

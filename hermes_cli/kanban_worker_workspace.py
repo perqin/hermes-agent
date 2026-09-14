@@ -132,8 +132,10 @@ def cleanup_project_worktree(
     profile: str,
 ) -> bool:
     """Remove a safe backend worktree; preserve dirty or unpushed work."""
-    root = str(board_meta.get("default_workdir") or "").strip()
-    target = str(getattr(task, "workspace_path", None) or "").strip()
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    root = nonblank_backend_path(board_meta.get("default_workdir"))
+    target = nonblank_backend_path(getattr(task, "workspace_path", None))
     branch = str(getattr(task, "branch_name", None) or "").strip()
     if not (root and target):
         return False
@@ -165,8 +167,10 @@ def materialize_project_workspace(
     profile: str,
 ) -> tuple[str, str]:
     """Validate and materialize ``task`` in ``env`` without host path probes."""
-    root = str(board_meta.get("default_workdir") or "").strip()
-    target = str(getattr(task, "workspace_path", None) or "").strip()
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    root = nonblank_backend_path(board_meta.get("default_workdir"))
+    target = nonblank_backend_path(getattr(task, "workspace_path", None))
     branch = str(getattr(task, "branch_name", None) or "").strip()
     kind = str(getattr(task, "workspace_kind", None) or "scratch")
     task_id = str(getattr(task, "id", "") or "")
@@ -229,11 +233,14 @@ def prepare_project_workspace_from_env() -> Optional[str]:
     agent turn starts, causing normal Kanban worker failure/block accounting.
     """
     task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
-    project_root = (
+    raw_project_root = (
         os.environ.get("HERMES_KANBAN_BACKEND_ROOT")
         or os.environ.get("HERMES_KANBAN_PROJECT_ROOT")
         or ""
-    ).strip()
+    )
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    project_root = nonblank_backend_path(raw_project_root)
     if not (task_id and project_root):
         return None
 
@@ -253,7 +260,7 @@ def prepare_project_workspace_from_env() -> Optional[str]:
         task = kb.get_task(conn, task_id)
         if task is None:
             raise ValueError(f"Kanban task {task_id!r} disappeared before workspace preflight")
-        stored_root = str(getattr(task, "workspace_root", None) or "").strip()
+        stored_root = nonblank_backend_path(getattr(task, "workspace_root", None))
         if stored_root and stored_root != project_root:
             raise ValueError(f"Kanban task {task_id!r} workspace provenance does not match worker launch")
         meta = {

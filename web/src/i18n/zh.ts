@@ -772,6 +772,8 @@ export const zh: Translations = {
       "保存时，绝对路径会在此请求配置文件的终端环境中解析。",
     projectDirectoryPending: "正在终端环境中验证项目目录…",
     projectDirectoryValidationError: "项目目录验证失败：{error}",
+    projectDirectoryOverrideHint: "新任务会继承该目录作为默认工作区；每个任务仍可在创建对话框中覆盖它。",
+    saving: "正在保存…",
     logTruncated: "（显示最后 100 KB — 完整日志位于 ",
     logAt: "）",
   },

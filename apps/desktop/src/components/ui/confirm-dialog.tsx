@@ -15,6 +15,8 @@ import { useI18n } from '@/i18n'
 import { AlertTriangle } from '@/lib/icons'
 
 interface ConfirmDialogProps {
+  /** Retire every continuation when the owning operation/dialog is replaced. */
+  isCurrent?: () => boolean
   open: boolean
   onClose: () => void
   // Does the work. Throw to surface an inline error and keep the dialog open.
@@ -54,6 +56,7 @@ export function ConfirmDialog({
   cancelLabel,
   destructive = false,
   dismissOnConfirm = false,
+  isCurrent = () => true,
   secondaryAction
 }: ConfirmDialogProps) {
   const { t } = useI18n()
@@ -93,7 +96,7 @@ export function ConfirmDialog({
   }, [])
 
   async function run() {
-    if (busy) {
+    if (busy || !isCurrent()) {
       return
     }
 
@@ -102,9 +105,14 @@ export function ConfirmDialog({
     if (dismissOnConfirm) {
       try {
         await onConfirm()
-        onClose()
+
+        if (isCurrent()) {
+          onClose()
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : t.errors.genericFailure)
+        if (isCurrent()) {
+          setError(err instanceof Error ? err.message : t.errors.genericFailure)
+        }
       }
 
       return
@@ -114,12 +122,24 @@ export function ConfirmDialog({
 
     try {
       await onConfirm()
+
+      if (!isCurrent()) {
+        return
+      }
+
       setStatus('done')
       closeTimerRef.current = window.setTimeout(() => {
         closeTimerRef.current = null
-        onClose()
+
+        if (isCurrent()) {
+          onClose()
+        }
       }, 600)
     } catch (err) {
+      if (!isCurrent()) {
+        return
+      }
+
       setStatus('idle')
       setError(err instanceof Error ? err.message : t.errors.genericFailure)
     }

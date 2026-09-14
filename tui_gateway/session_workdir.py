@@ -36,11 +36,12 @@ def _completion_cwd(params: dict | None = None) -> str:
 
 
 def _workdir_terminal_cfg(key: str) -> str:
-    """Stripped ``terminal.<key>`` from config, or "" when unset/unreadable."""
+    """Nonblank ``terminal.<key>`` from config; preserve cwd bytes for backend paths."""
     with contextlib.suppress(Exception):
         terminal_cfg = _load_cfg().get("terminal", {})
         if isinstance(terminal_cfg, dict):
-            return str(terminal_cfg.get(key) or "").strip()
+            raw = str(terminal_cfg.get(key) or "")
+            return raw if key == "cwd" and raw.strip() else raw.strip()
     return ""
 
 
@@ -59,7 +60,8 @@ def _terminal_task_cwd_with_source(session: dict | None) -> tuple[str, str]:
         # THIS session's explicit workspace beats the LAST session's env var.
         if session and session.get("explicit_cwd") and session.get("cwd"):
             return str(session["cwd"]), "session"
-        raw = os.environ.get("TERMINAL_CWD", "").strip() or _workdir_terminal_cfg("cwd")
+        process_cwd = os.environ.get("TERMINAL_CWD", "")
+        raw = (process_cwd if process_cwd.strip() else "") or _workdir_terminal_cfg("cwd")
         if raw and raw not in {".", "auto", "cwd"}:
             return raw, "process"
         if backend == "ssh":
@@ -76,9 +78,10 @@ def _session_cwd(session: dict | None) -> str:
 def _active_terminal_filesystem_is_local() -> bool:
     """Current terminal capability; unknown/malformed providers fail closed to non-local."""
     try:
+        from tools.terminal_tool import _get_env_config
         from tools.terminal_tool_backends import terminal_filesystem_scope
 
-        return terminal_filesystem_scope(_effective_terminal_backend()) == "local"
+        return terminal_filesystem_scope(_get_env_config().get("env_type", "")) == "local"
     except Exception:
         return False
 
@@ -129,11 +132,6 @@ def _heal_dead_cwd(cwd: str) -> str:
     return probe
 
 
-def _is_local_terminal_backend() -> bool:
-    backend = (os.environ.get("TERMINAL_ENV") or "").strip().lower()
-    return not backend or backend == "local"
-
-
 def _effective_terminal_backend() -> str:
     """Active terminal backend name (``local``, ``docker``, ``ssh``, ...): ``TERMINAL_ENV`` when set (launchers bridge
     ``terminal.backend`` into env), else the ``terminal.backend`` config key (in-process gateways skip that bridge)."""
@@ -146,7 +144,7 @@ def _effective_terminal_backend() -> str:
 def _display_session_cwd(session: dict | None) -> str:
     """Session cwd for display/probe surfaces, healed past deleted worktrees (healed value persisted back; local only)."""
     cwd = _session_cwd(session)
-    if not _is_local_terminal_backend():
+    if not _session_filesystem_is_local(session):
         return cwd
     healed = _heal_dead_cwd(cwd)
     if healed and healed != cwd and session is not None:
@@ -163,7 +161,7 @@ def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
     never overridden. Local backends only (a remote cwd cannot be stat'ed or git-probed here)."""
     # An explicit choice only moves by another explicit action; a cwd adopted HERE is marked `cwd_from_settle` so
     # successive settles keep following.
-    if not session or not _is_local_terminal_backend():
+    if not session or not _session_filesystem_is_local(session):
         return False
     if session.get("explicit_cwd") and not session.get("cwd_from_settle"):
         return False

@@ -777,6 +777,8 @@ export const es: Translations = {
       "La ruta absoluta se resuelve al guardar en el entorno de terminal del perfil de esta solicitud.",
     projectDirectoryPending: "Validando el directorio del proyecto en el entorno de terminal…",
     projectDirectoryValidationError: "No se pudo validar el directorio del proyecto: {error}",
+    projectDirectoryOverrideHint: "Las tareas nuevas lo heredan como espacio de trabajo predeterminado; cada tarea puede cambiarlo en el diálogo de creación.",
+    saving: "Guardando…",
     logTruncated: "(mostrando los últimos 100 KB — registro completo en ",
     logAt: ")",
   },

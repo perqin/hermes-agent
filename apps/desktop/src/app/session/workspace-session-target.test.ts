@@ -128,4 +128,21 @@ describe('startWorkspaceSession', () => {
 
     expect($newChatProfile.get()).toBe('work')
   })
+
+  it('preserves canonical leading and trailing whitespace bytes in an explicit workspace', async () => {
+    const requestGateway = vi.fn().mockResolvedValue({ branch: 'main', cwd: ' /canonical/repo ' })
+    const startFreshSessionDraft = vi.fn()
+
+    startWorkspaceSession({
+      activeSessionIdRef: { current: null },
+      path: ' /canonical/repo ',
+      requestGateway,
+      startFreshSessionDraft
+    })
+
+    expect(startFreshSessionDraft).toHaveBeenCalledWith({ workspaceTarget: ' /canonical/repo ' })
+    expect(requestGateway).toHaveBeenCalledWith('config.get', { cwd: ' /canonical/repo ', key: 'project' })
+    await Promise.resolve()
+    expect($currentCwd.get()).toBe(' /canonical/repo ')
+  })
 })

@@ -3,7 +3,9 @@ import ignore from 'ignore'
 import type { HermesReadDirEntry, HermesReadDirResult } from '@/global'
 import { desktopFsCacheKey, desktopGitRoot, readDesktopDir, readDesktopFileDataUrl } from '@/lib/desktop-fs'
 import { ALWAYS_EXCLUDED } from '@/lib/excluded-paths'
-import { cleanPath, comparisonPath } from '@/lib/path-compare'
+import { cleanPath, comparisonPath, joinPath } from '@/lib/path-compare'
+import { $projectFilesystemScope, projectFilesystemIsLocal } from '@/lib/project-filesystem-capability'
+import { $connection } from '@/store/session'
 
 export type ProjectTreeEntry = HermesReadDirEntry
 
@@ -14,6 +16,15 @@ interface GitignoreRule {
 
 const gitRootCache = new Map<string, Promise<string | null>>()
 const gitignoreCache = new Map<string, Promise<GitignoreRule | null>>()
+let readGeneration = 0
+$connection.listen(() => {
+  readGeneration += 1
+  clearProjectDirCache()
+})
+$projectFilesystemScope.listen(() => {
+  readGeneration += 1
+  clearProjectDirCache()
+})
 
 function decodeDataUrl(dataUrl: string) {
   const match = dataUrl.match(/^data:[^,]*,(.*)$/)
@@ -45,8 +56,8 @@ function relativeTo(root: string, child: string) {
 
 /** Repo-root → repo-root/a → repo-root/a/b → … for every dir between root and `dir`. */
 function ancestorDirs(root: string, dir: string) {
-  const r = cleanPath(root)
-  const rel = relativeTo(r, dir)
+  const r = root
+  const rel = relativeTo(root, dir)
 
   if (rel === null || rel === '') {
     return [r]
@@ -56,7 +67,7 @@ function ancestorDirs(root: string, dir: string) {
   let current = r
 
   for (const part of rel.split('/').filter(Boolean)) {
-    current = `${current}/${part}`
+    current = joinPath(current, part)
     dirs.push(current)
   }
 
@@ -68,7 +79,7 @@ async function gitRootFor(start: string) {
   let cached = gitRootCache.get(key)
 
   if (!cached) {
-    cached = desktopGitRoot(cleanPath(start))
+    cached = desktopGitRoot(start)
     gitRootCache.set(key, cached)
   }
 
@@ -76,15 +87,15 @@ async function gitRootFor(start: string) {
 }
 
 /** Read .gitignore at `dir` if it actually exists — never probe missing files. */
-async function readGitignore(dir: string): Promise<GitignoreRule | null> {
+async function readGitignore(dir: string, live: () => boolean): Promise<GitignoreRule | null> {
   try {
     const listing = await readDesktopDir(dir)
 
-    if (!listing.entries.some(e => e.name === '.gitignore' && !e.isDirectory)) {
+    if (!live() || !listing.entries.some(e => e.name === '.gitignore' && !e.isDirectory)) {
       return null
     }
 
-    const text = decodeDataUrl(await readDesktopFileDataUrl(`${dir}/.gitignore`))
+    const text = decodeDataUrl(await readDesktopFileDataUrl(joinPath(dir, '.gitignore')))
 
     return { base: dir, ig: ignore().add(text) }
   } catch {
@@ -92,12 +103,12 @@ async function readGitignore(dir: string): Promise<GitignoreRule | null> {
   }
 }
 
-async function gitignoreFor(dir: string) {
+async function gitignoreFor(dir: string, live: () => boolean) {
   const key = `${desktopFsCacheKey()}:${cleanPath(dir)}`
   let cached = gitignoreCache.get(key)
 
   if (!cached) {
-    cached = readGitignore(cleanPath(dir))
+    cached = readGitignore(dir, live)
     gitignoreCache.set(key, cached)
   }
 
@@ -116,29 +127,43 @@ function ignoredBy(rules: GitignoreRule[], entry: HermesReadDirEntry) {
   })
 }
 
-async function filterIgnored(entries: HermesReadDirEntry[], rootPath: string, dirPath: string) {
+async function filterIgnored(entries: HermesReadDirEntry[], rootPath: string, dirPath: string, live: () => boolean) {
   const root = await gitRootFor(rootPath)
 
-  if (!root) {
+  if (!root || !live()) {
     return entries
   }
 
-  const rules = (await Promise.all(ancestorDirs(root, dirPath).map(gitignoreFor))).filter((r): r is GitignoreRule =>
-    Boolean(r)
+  const rules = (await Promise.all(ancestorDirs(root, dirPath).map(dir => gitignoreFor(dir, live)))).filter(
+    (r): r is GitignoreRule => Boolean(r)
   )
 
   return rules.length > 0 ? entries.filter(entry => !ignoredBy(rules, entry)) : entries
 }
 
 export async function readProjectDir(dirPath: string, rootPath = dirPath): Promise<HermesReadDirResult> {
+  const generation = readGeneration
+  const live = () => generation === readGeneration && projectFilesystemIsLocal()
+
+  if (!projectFilesystemIsLocal()) {
+    return { entries: [], error: 'non-local-filesystem' }
+  }
+
   if (!window.hermesDesktop) {
     return { entries: [], error: 'no-bridge' }
   }
 
   const result = await readDesktopDir(dirPath)
+
+  if (!live()) {
+    return { entries: [], error: 'non-local-filesystem' }
+  }
+
   const entries = (result?.entries ?? []).filter(entry => !ALWAYS_EXCLUDED.has(entry.name))
 
-  return { ...result, entries: await filterIgnored(entries, rootPath, dirPath) }
+  const filtered = await filterIgnored(entries, rootPath, dirPath, live)
+
+  return live() ? { ...result, entries: filtered } : { entries: [], error: 'non-local-filesystem' }
 }
 
 export function clearProjectDirCache(rootPath?: string) {

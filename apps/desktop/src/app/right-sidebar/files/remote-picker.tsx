@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { useI18n } from '@/i18n'
-import { readDesktopDir, setDesktopFsRemotePicker } from '@/lib/desktop-fs'
+import { type DesktopFsWriteRoute, readDesktopDir, setDesktopFsRemotePicker } from '@/lib/desktop-fs'
 import { displayPath, pathLeaf } from '@/lib/display-path'
 import { cn } from '@/lib/utils'
 
@@ -31,6 +31,7 @@ function pathName(path: string) {
 interface PendingSelection {
   defaultPath: string
   resolve: (paths: string[]) => void
+  route?: DesktopFsWriteRoute
   title: string
 }
 
@@ -45,11 +46,20 @@ export function RemoteFolderPicker() {
 
   useEffect(() => {
     setDesktopFsRemotePicker({
-      selectPaths: options =>
+      cancel: () => {
+        setPending(current => {
+          current?.resolve([])
+
+          return null
+        })
+        setEntries([])
+        setError(null)
+      },
+      selectPaths: (options, route) =>
         new Promise(resolve => {
           const defaultPath = clean(options?.defaultPath || '/')
           setCurrentPath(defaultPath)
-          setPending({ defaultPath, resolve, title: options?.title || r.remotePickerTitle })
+          setPending({ defaultPath, resolve, route, title: options?.title || r.remotePickerTitle })
         })
     })
 
@@ -65,7 +75,7 @@ export function RemoteFolderPicker() {
     setLoading(true)
     setError(null)
 
-    void readDesktopDir(currentPath)
+    void readDesktopDir(currentPath, pending.route)
       .then(result => {
         if (!active) {
           return

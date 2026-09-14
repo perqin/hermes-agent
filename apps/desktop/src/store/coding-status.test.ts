@@ -1,18 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesRepoStatus } from '@/global'
+import { projectFilesystemConfigWritten, setProjectFilesystemScope } from '@/lib/project-filesystem-capability'
 
 import {
   $repoStatus,
   $repoStatusByCwd,
   $repoStatusLoading,
   _resetCodingStatusForTests,
+  openWorktreeDialog,
   refreshAllRepoStatuses,
   refreshRepoStatus,
   registerRepoStatusCwd,
   repoChangeKindForPath,
-  repoStatusForCwd
+  repoStatusForCwd,
+  resolveWorktreeRepoPath
 } from './coding-status'
+import * as projectsStore from './projects'
 import { $currentCwd, $selectedStoredSessionId } from './session'
 
 const sampleStatus: HermesRepoStatus = {
@@ -47,6 +51,7 @@ function stubProbe(impl: (cwd: string) => Promise<HermesRepoStatus | null>) {
 
 describe('refreshRepoStatus', () => {
   beforeEach(() => {
+    setProjectFilesystemScope('local')
     vi.useFakeTimers()
     _resetCodingStatusForTests()
     $currentCwd.set('')
@@ -58,6 +63,7 @@ describe('refreshRepoStatus', () => {
   })
 
   afterEach(() => {
+    setProjectFilesystemScope('unknown')
     _resetCodingStatusForTests()
     vi.clearAllTimers()
     vi.useRealTimers()
@@ -254,6 +260,60 @@ describe('refreshRepoStatus', () => {
     expect(repoStatusForCwd('/main').get()).toEqual(sampleStatus)
 
     release?.()
+  })
+})
+
+describe('resolveWorktreeRepoPath', () => {
+  it('does not reopen a stale worktree dialog after terminal config invalidates an in-flight resolver', async () => {
+    let finish!: (scope: 'local') => void
+    const capture = vi.spyOn(projectsStore, 'captureProjectPathContext').mockReturnValue({} as never)
+
+    const scope = vi
+      .spyOn(projectsStore, 'projectFilesystemScope')
+      .mockReturnValue(new Promise(resolve => (finish = resolve)))
+
+    setProjectFilesystemScope('local')
+    stubProbe(vi.fn(async () => sampleStatus))
+    projectsStore.$projectScope.set('p-local')
+    projectsStore.$projectTree.set([
+      { id: 'p-local', label: 'Local', path: '/repo', repos: [], sessionCount: 0 }
+    ])
+
+    const pending = openWorktreeDialog()
+    projectFilesystemConfigWritten()
+    setProjectFilesystemScope('local')
+    finish('local')
+    await pending
+
+    expect(projectsStore.$worktreeDialog.get()).toBeNull()
+    capture.mockRestore()
+    scope.mockRestore()
+  })
+
+  it('does not send a non-local Project path to the desktop Git transport', async () => {
+    const probe = vi.fn(async () => sampleStatus)
+    const scope = vi.spyOn(projectsStore, 'projectFilesystemScope').mockResolvedValue('non_local')
+    stubProbe(probe)
+    projectsStore.$projectScope.set('p-remote')
+    projectsStore.$projectTree.set([
+      {
+        id: 'p-remote',
+        label: 'Remote',
+        path: '/backend/repo',
+        repos: [],
+        sessionCount: 0
+      }
+    ])
+
+    try {
+      await expect(resolveWorktreeRepoPath()).resolves.toBe('')
+      expect(probe).not.toHaveBeenCalled()
+    } finally {
+      scope.mockRestore()
+      projectsStore.$projectScope.set(projectsStore.ALL_PROJECTS)
+      projectsStore.$projectTree.set([])
+      delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+    }
   })
 })
 

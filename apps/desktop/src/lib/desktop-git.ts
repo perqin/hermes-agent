@@ -8,8 +8,12 @@ import type {
   HermesReviewShipInfo
 } from '@/global'
 import { hermesApi } from '@/hermes'
+import { $gatewayActivationGeneration } from '@/store/gateway'
+import { $connection } from '@/store/session'
+import type { ProjectFilesystemScope } from '@/types/hermes'
 
 import { desktopFsProfile, isDesktopFsRemoteMode } from './desktop-fs'
+import { $projectFilesystemScope, setProjectFilesystemScope } from './project-filesystem-capability'
 
 // Remote-aware git facade. Locally the desktop runs git through Electron
 // (window.hermesDesktop.git); on a remote gateway that's the wrong filesystem,
@@ -109,10 +113,44 @@ const remoteGit: GitBridge = {
   scanRepos: async () => []
 }
 
+let gitGeneration = 0
+$gatewayActivationGeneration.listen(() => {
+  gitGeneration += 1
+})
+$projectFilesystemScope.listen(() => {
+  gitGeneration += 1
+})
+$connection.listen(() => {
+  gitGeneration += 1
+})
+
+function guardedGit<T extends object>(bridge: T, live: () => boolean): T {
+  return new Proxy(bridge, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver)
+
+      if (typeof value === 'function') {
+        return (...args: unknown[]) =>
+          live() ? Reflect.apply(value, target, args) : Promise.reject(new Error('stale project filesystem context'))
+      }
+
+      return value && typeof value === 'object' ? guardedGit(value, live) : value
+    }
+  })
+}
+
 export function desktopGit(): GitBridge | undefined {
-  if (typeof window === 'undefined') {
+  if (typeof window === 'undefined' || $projectFilesystemScope.get() !== 'local') {
     return undefined
   }
 
-  return isDesktopFsRemoteMode() ? remoteGit : window.hermesDesktop?.git
+  const bridge = isDesktopFsRemoteMode() ? remoteGit : window.hermesDesktop?.git
+  const generation = gitGeneration
+
+  return bridge
+    ? guardedGit(bridge, () => generation === gitGeneration && $projectFilesystemScope.get() === 'local')
+    : undefined
 }
+
+/** Test seam; production publication is owned by the Projects capability resolver. */
+export const setDesktopGitFilesystemScope = (scope: ProjectFilesystemScope): void => setProjectFilesystemScope(scope)
