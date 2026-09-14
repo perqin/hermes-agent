@@ -1,5 +1,9 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+
+import { projectFilesystemConfigWritten } from '@/lib/project-filesystem-capability'
+import { $gatewayActivationGeneration } from '@/store/gateway'
+import { captureProjectPathContext, deleteProject } from '@/store/projects'
 
 import { ProjectMenu } from './project-menu'
 import type { SidebarProjectTree } from './workspace-groups'
@@ -58,6 +62,7 @@ vi.mock('@/store/layout', () => ({
 }))
 
 vi.mock('@/store/projects', () => ({
+  captureProjectPathContext: vi.fn(() => ({ gateway: {}, profile: 'origin', generation: 1, remoteConnection: false })),
   copyPath: vi.fn(),
   deleteProject: vi.fn(),
   openProjectAddFolder: vi.fn(),
@@ -87,7 +92,40 @@ const openTriggerMenu = (trigger: HTMLElement) => {
   fireEvent.click(trigger)
 }
 
+vi.mock('@/store/gateway', async () => {
+  const { atom } = await import('nanostores')
+
+  return { $gatewayActivationGeneration: atom(0) }
+})
+
 describe('ProjectMenu', () => {
+  it('closes a pending delete when filesystem config is invalidated', async () => {
+    render(<ProjectMenu isActive={false} project={project} />)
+    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete…' }))
+    expect(await screen.findByRole('button', { name: 'Delete' })).toBeTruthy()
+    act(() => projectFilesystemConfigWritten())
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
+  })
+  it('closes a pending delete when gateway activation is invalidated', async () => {
+    render(<ProjectMenu isActive={false} project={project} />)
+    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete…' }))
+    expect(await screen.findByRole('button', { name: 'Delete' })).toBeTruthy()
+    act(() => $gatewayActivationGeneration.set($gatewayActivationGeneration.get() + 1))
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
+  })
+
+  it('binds delete confirmation to the context captured when opened', async () => {
+    render(<ProjectMenu isActive={false} project={project} />)
+    openTriggerMenu(screen.getByRole('button', { name: 'Actions' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete…' }))
+    const origin = vi.mocked(captureProjectPathContext).mock.results.at(-1)?.value
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    expect(deleteProject).toHaveBeenCalledWith('p1', origin)
+    expect(captureProjectPathContext).toHaveBeenCalled()
+  })
+
   it('does not wrap the kebab trigger in a Tip', () => {
     render(<ProjectMenu isActive={false} project={project} />)
 

@@ -139,6 +139,20 @@ def test_patch_board_sets_project_directory(client, tmp_path):
     )
 
 
+def test_legacy_board_keeps_local_git_workspace_detection(monkeypatch):
+    import tools.terminal_tool as terminal_tool
+
+    _load_plugin_router()
+    plugin_api = sys.modules["hermes_dashboard_plugin_kanban_test"]
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "local"})
+    monkeypatch.setattr(plugin_api.kbw, "_git_toplevel", lambda path: path)
+
+    assert plugin_api._default_workspace_kind({
+        "default_workdir": "/legacy/local/repo",
+        "filesystem_local": None,
+    }) == "worktree"
+
+
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
     """Scheduled/time-delay tasks must not be silently bucketed into todo."""
 
@@ -189,6 +203,58 @@ def test_dashboard_markdown_html_is_sanitized_before_render():
     assert "MARKDOWN_ALLOWED_TAGS" in js
     assert "sanitizeMarkdownHtml(renderMarkdown(props.source || \"\"))" in js
     assert "dangerouslySetInnerHTML: { __html: renderMarkdown(props.source || \"\") }" not in js
+
+
+def test_dashboard_backend_path_and_workspace_inheritance_bundle_contract():
+    """The checked-in plugin artifact preserves backend path authority."""
+    bundle = (
+        Path(__file__).resolve().parents[2]
+        / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    ).read_text(encoding="utf-8")
+
+    # An untouched board default is inheritance, not an explicit task override.
+    assert "const [workspacePathDirty, setWorkspacePathDirty] = useState(false);" in bundle
+    assert "if (workspacePathDirty) body.workspace_path = workspacePath;" in bundle
+    assert "setWorkspacePathDirty(true)" in bundle
+
+    # Browser input stays textual and tells users where resolution happens.
+    assert "request profile's terminal environment" in bundle
+    board_dialogs = bundle[bundle.index("function NewBoardDialog"):bundle.index("// Toolbar")]
+    assert 'type: "file"' not in board_dialogs
+    assert "source_profile" not in bundle
+
+    # Both Board dialogs retain backend errors and return focus to the path.
+    assert bundle.count("setErr(parseApiErrorMessage(e))") >= 2
+    assert bundle.count("projectDirectoryRef.current.focus()") >= 2
+
+    # trim() decides only blank/clear UX; backend path parsers receive raw text.
+    assert "default_workdir: projectDirectory.trim() ? projectDirectory : undefined" in bundle
+    assert "default_workdir: projectDirectory.trim() ? projectDirectory : \"\"" in bundle
+    assert "if (workspacePathDirty) body.workspace_path = workspacePath;" in bundle
+    assert "body.workspace_path = wpTrim" not in bundle
+
+    # Omission means inherit Board/Project defaults. Explicit scratch is a real
+    # override and therefore must be sent rather than omitted.
+    assert 'if (workspaceKind === "scratch") body.workspace_kind = "scratch";' in bundle
+
+
+def test_project_directory_helper_pending_and_validation_copy_exist_in_every_web_locale():
+    locale_dir = Path(__file__).resolve().parents[2] / "web" / "src" / "i18n"
+    locale_files = [
+        "en.ts", "af.ts", "ar.ts", "de.ts", "es.ts", "fr.ts", "ga.ts",
+        "hu.ts", "it.ts", "ja.ts", "ko.ts", "pt.ts", "ru.ts", "tr.ts",
+        "uk.ts", "zh.ts", "zh-hant.ts",
+    ]
+    for filename in locale_files:
+        text = (locale_dir / filename).read_text(encoding="utf-8")
+        for key in (
+            "projectDirectoryExplanation",
+            "projectDirectoryPending",
+            "projectDirectoryValidationError",
+            "projectDirectoryOverrideHint",
+            "saving",
+        ):
+            assert f"{key}:" in text, f"{filename} is missing {key}"
 
 
 # ---------------------------------------------------------------------------

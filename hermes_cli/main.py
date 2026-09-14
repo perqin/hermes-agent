@@ -1528,12 +1528,28 @@ def _resolve_chat_session_args(args, use_tui: bool) -> None:
         and not getattr(args, "worktree", False)
     ):
         with _session_db() as db:  # never let cwd-restore break a resume
-            _saved_cwd = ((db.get_session(args.resume) or {}).get("cwd") or "").strip()
-            if _saved_cwd and not os.path.isdir(_saved_cwd):
-                print(f"⚠ session's recorded dir is gone ({_saved_cwd}); staying in {os.getcwd()}")
-            elif _saved_cwd and os.path.realpath(_saved_cwd) != os.path.realpath(os.getcwd()):
-                os.chdir(_saved_cwd)
-                print(f"↪ restored workspace dir: {_saved_cwd}")
+            _saved_cwd = str((db.get_session(args.resume) or {}).get("cwd") or "")
+            if _saved_cwd.strip():
+                try:
+                    from hermes_cli.project_paths import resolve_project_folder
+                    from tools.terminal_tool import acquire_terminal_environment
+
+                    _scope = f"cli-resume:{args.resume}"
+                    _env = acquire_terminal_environment(operation_scope=_scope)
+                    if getattr(_env, "is_local", False) is not True:
+                        _canonical_cwd = resolve_project_folder(
+                            _saved_cwd, operation_scope=_scope, environment=_env)
+                        os.environ["TERMINAL_CWD"] = _canonical_cwd
+                        print(f"↪ restored backend workspace dir: {_canonical_cwd}")
+                    elif not os.path.isdir(_saved_cwd):
+                        print(f"⚠ session's recorded dir is gone ({_saved_cwd}); staying in {os.getcwd()}")
+                    elif os.path.realpath(_saved_cwd) != os.path.realpath(os.getcwd()):
+                        os.chdir(_saved_cwd)
+                        print(f"↪ restored workspace dir: {_saved_cwd}")
+                except ValueError:
+                    print(f"⚠ session's recorded backend dir is unavailable ({_saved_cwd})")
+                except Exception:
+                    print("⚠ session's terminal environment is unavailable; workspace was not restored")
 
 
 def _warn_retired_xai_models() -> None:
@@ -1719,6 +1735,18 @@ def cmd_chat(args):
     # --source: tag session source for filtering (e.g. 'tool' for integrations)
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
+
+    # The profile flag/HERMES_HOME have been applied before this handler.  Only
+    # now is it safe to acquire the assignee's terminal environment and touch a
+    # Project-bound backend path.
+    if os.environ.get("HERMES_KANBAN_BACKEND_ROOT") or os.environ.get("HERMES_KANBAN_PROJECT_ROOT"):
+        from hermes_cli.kanban_worker_workspace import prepare_project_workspace_from_env
+
+        try:
+            prepare_project_workspace_from_env()
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     _pin_kanban_board_env()
     _confirm_startup_expensive_model_override(args)

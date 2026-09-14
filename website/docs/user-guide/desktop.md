@@ -86,6 +86,15 @@ desktop:
 
 Changing any of these values invalidates only that profile's disk-discovery cache and starts a policy-compliant refresh. **Hide from sidebar** remains a separate per-item curation action.
 
+#### Adding Project directories
+
+Project directory entry follows the selected profile's terminal filesystem, which is independent of whether Desktop connects to its gateway locally or remotely:
+
+- A profile using the gateway's local filesystem keeps directory browsing. A locally connected app opens the native system picker; a remotely connected app uses the in-app gateway directory browser.
+- A profile using a separate terminal filesystem shows a path field instead. Enter the path as that backend sees it, including relative or `~` paths when appropriate. Desktop does not expand or check it on your computer.
+
+When you submit, the backend resolves and validates non-local paths in the profile's terminal environment. The Project then displays the canonical path returned by the backend. If validation fails, the dialog stays open with your input intact so you can correct it. Switching profiles or connections does not retarget an already-open path request to the new profile.
+
 #### Choosing a model
 
 The model picker lives in the **composer**, just left of the microphone. Click it to switch the model, reasoning effort, and fast mode from one dropdown.

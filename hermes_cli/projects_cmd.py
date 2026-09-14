@@ -7,6 +7,28 @@ import functools
 import sys
 
 from hermes_cli import projects_db as pdb
+from hermes_cli.project_paths import (
+    resolve_project_folder, resolve_project_folder_reference, resolve_project_folders,
+)
+from hermes_constants import get_hermes_home
+
+
+def _project_operation_scope() -> str:
+    return f"projects:{get_hermes_home()}"
+
+
+def _project_binding_snapshot(proj) -> dict:
+    """Resolve the Project root and workspace facts in its owning profile."""
+    if not proj.primary_path:
+        raise ValueError(f"project {proj.slug!r} has no primary folder")
+    from hermes_cli.kanban_project_paths import resolve_project_directory
+    from hermes_cli.profiles import get_active_profile_name
+
+    profile = get_active_profile_name() or "default"
+    return resolve_project_directory(
+        proj.primary_path,
+        operation_scope=f"kanban-bind:{profile}:{proj.id}",
+    )
 
 
 def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -132,9 +154,12 @@ def _print_project(proj) -> None:
 
 @_db_command
 def _cmd_create(args, conn) -> int:
+    folders, primary = resolve_project_folders(
+        args.folders, args.primary, operation_scope=_project_operation_scope())
     pid = pdb.create_project(
-        conn, name=args.name, slug=args.slug, folders=args.folders, primary_path=args.primary,
+        conn, name=args.name, slug=args.slug, folders=folders, primary_path=primary,
         description=args.description, icon=args.icon, color=args.color, board_slug=args.board,
+        canonical_paths=True,
     )
     if args.use:
         pdb.set_active(conn, pid)
@@ -167,15 +192,20 @@ def _cmd_show(args, conn, proj) -> int:
 
 @_with_project
 def _cmd_add_folder(args, conn, proj) -> str:
-    path = pdb.add_folder(conn, proj.id, args.path, label=args.label, is_primary=args.primary)
+    canonical = resolve_project_folder(args.path, operation_scope=_project_operation_scope())
+    path = pdb.add_folder(
+        conn, proj.id, canonical, label=args.label, is_primary=args.primary,
+        canonical_paths=True)
     return f"Added {path} to {proj.slug}"
 
 
 @_with_project
 def _cmd_remove_folder(args, conn, proj):
-    if not pdb.remove_folder(conn, proj.id, args.path):
+    canonical = resolve_project_folder_reference(
+        proj, args.path, operation_scope=_project_operation_scope())
+    if not pdb.remove_folder(conn, proj.id, canonical, canonical_paths=True):
         return _err(f"folder not in project: {args.path}")
-    return f"Removed {args.path} from {proj.slug}"
+    return f"Removed {canonical} from {proj.slug}"
 
 
 @_with_project
@@ -186,9 +216,11 @@ def _cmd_rename(args, conn, proj) -> str:
 
 @_with_project
 def _cmd_set_primary(args, conn, proj):
-    if not pdb.set_primary(conn, proj.id, args.path):
+    canonical = resolve_project_folder_reference(
+        proj, args.path, operation_scope=_project_operation_scope())
+    if not pdb.set_primary(conn, proj.id, canonical, canonical_paths=True):
         return _err(f"'{args.path}' is not a folder of {proj.slug}; add it first with `hermes project add-folder`.")
-    return f"Set primary of {proj.slug} -> {args.path}"
+    return f"Set primary of {proj.slug} -> {canonical}"
 
 
 @_db_command
@@ -210,19 +242,35 @@ def _flag_command(op: str, verb: str):
 
 @_with_project
 def _cmd_bind_board(args, conn, proj) -> str:
-    pdb.update_project(conn, proj.id, board_slug=args.board)
-    if not args.board.strip():
-        return f"Unbound board from {proj.slug}"
-    if proj.primary_path:  # best-effort: point the bound board's default_workdir at the primary repo
-        try:
-            from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_project_binding import (
+        clear_owned_project_binding,
+        reciprocal_project_bind,
+    )
+    from hermes_cli.profiles import get_active_profile_name
 
-            slug = kb._normalize_board_slug(args.board)
-            if slug and (slug == kb.DEFAULT_BOARD or kb.board_exists(slug)):
-                kb.write_board_metadata(slug, default_workdir=proj.primary_path)
-        except Exception:
-            pass
-    return f"Bound {proj.slug} -> board {args.board}"
+    requested = str(args.board or "").strip()
+    if not requested:
+        if proj.board_slug:
+            clear_owned_project_binding(conn, proj, proj.board_slug)
+        else:
+            pdb.update_project(conn, proj.id, board_slug="")
+        return f"Unbound board from {proj.slug}"
+
+    slug = kb._normalize_board_slug(requested)
+    if not slug or (slug != kb.DEFAULT_BOARD and not kb.board_exists(slug)):
+        raise ValueError(f"board {requested!r} does not exist")
+
+    snapshot = _project_binding_snapshot(proj)
+    with reciprocal_project_bind(conn, proj, slug):
+        kb.write_board_metadata(
+            slug,
+            project_id=proj.id,
+            project_slug=proj.slug,
+            source_profile=get_active_profile_name() or "default",
+            **snapshot,
+        )
+    return f"Bound {proj.slug} -> board {slug}"
 
 
 _HANDLERS = {

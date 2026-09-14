@@ -4,6 +4,30 @@ import tools.terminal_tool as terminal_tool
 import tools.terminal_tool_sudo as terminal_tool_sudo
 
 
+def test_acquire_terminal_environment_uses_sessionless_operation_scope(monkeypatch):
+    planned = []
+    environments = {}
+
+    def fake_plan(command, *, task_id, timeout, background, _host_local):
+        planned.append((command, task_id, timeout, background, _host_local))
+        return type("Plan", (), {"effective_task_id": task_id})()
+
+    def fake_acquire(plan, task_id):
+        return environments.setdefault(plan.effective_task_id, object())
+
+    monkeypatch.setattr(terminal_tool, "_plan_execution", fake_plan)
+    monkeypatch.setattr(terminal_tool, "_acquire_env", fake_acquire)
+
+    first = terminal_tool.acquire_terminal_environment(operation_scope="projects:alpha")
+    again = terminal_tool.acquire_terminal_environment(operation_scope="projects:alpha")
+    other = terminal_tool.acquire_terminal_environment(operation_scope="projects:beta")
+
+    assert first is again
+    assert other is not first
+    assert [item[1] for item in planned] == ["projects:alpha", "projects:alpha", "projects:beta"]
+    assert all(item[0] == ":" and item[3:] == (False, False) for item in planned)
+
+
 def setup_function():
     terminal_tool_sudo._reset_cached_sudo_passwords()
 

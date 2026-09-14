@@ -162,6 +162,52 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
             _recent_worker_exits.pop(_pid, None)
 
 
+def _backend_owned_project_binding(task: "Task", board: Optional[str]) -> Optional[dict]:
+    """Return immutable task provenance requiring assignee-side preflight."""
+    del board  # Board binding may have changed since task creation.
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    root = nonblank_backend_path(getattr(task, "workspace_root", None))
+    if getattr(task, "workspace_requires_preflight", False) and root:
+        return {
+            "project_id": getattr(task, "project_id", None),
+            "project_slug": getattr(task, "workspace_project_slug", None),
+            "source_profile": getattr(task, "workspace_source_profile", None),
+            "default_workdir": root,
+            "default_workspace_kind": getattr(task, "workspace_kind", None),
+            "filesystem_local": getattr(task, "workspace_filesystem_local", None),
+        }
+    # Conservative compatibility for pre-provenance Project worktrees: their
+    # root is derivable from the immutable task path without mutable Board state.
+    if getattr(task, "project_id", None) and getattr(task, "workspace_kind", None) == "worktree":
+        from hermes_cli.kanban_project_paths import worktree_root_for_task
+
+        root = worktree_root_for_task(
+            str(getattr(task, "workspace_path", "") or ""),
+            str(getattr(task, "id", "") or ""),
+        )
+        if root:
+            branch_prefix = str(getattr(task, "branch_name", "") or "").partition("/")[0]
+            return {
+                "project_id": task.project_id,
+                "project_slug": branch_prefix,
+                "default_workdir": root,
+                "default_workspace_kind": "worktree",
+                "filesystem_local": None,
+            }
+    if getattr(task, "project_id", None) and getattr(task, "workspace_kind", None) == "dir":
+        legacy_path = nonblank_backend_path(getattr(task, "workspace_path", None))
+        if legacy_path:
+            return {
+                "project_id": task.project_id,
+                "project_slug": None,
+                "default_workdir": legacy_path,
+                "default_workspace_kind": "dir",
+                "filesystem_local": None,
+            }
+    return None
+
+
 def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     """``(kind, code)`` for a reaped worker PID: ``clean_exit`` (rc 0 while
     still ``running`` = protocol violation), ``rate_limited``
@@ -1553,7 +1599,20 @@ def _dispatch_lane_task(
         return False
     try:
         resolved_branch_name = None
-        if claimed.workspace_kind == "worktree":
+        backend_binding = _backend_owned_project_binding(claimed, board)
+        if backend_binding is None and claimed.workspace_kind in {"dir", "worktree"}:
+            from hermes_cli.kanban_project_paths import legacy_host_workspace_allowed
+
+            if not legacy_host_workspace_allowed(claimed.assignee):
+                raise ValueError("Legacy workspace requires verified local controller and assignee policy")
+        if backend_binding is not None:
+            # Desired backend strings cross the controller unchanged.  The
+            # assignee-side preflight validates and materializes them.
+            workspace = str(claimed.workspace_path or "")
+            if not workspace:
+                raise ValueError(f"Project-bound task {claimed.id} has no desired workspace path")
+            resolved_branch_name = (claimed.branch_name or "").strip() or f"wt/{claimed.id}"
+        elif claimed.workspace_kind == "worktree":
             workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
         else:
             workspace = _kbw.resolve_workspace(claimed, board=board)
@@ -2203,6 +2262,12 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
     env["HERMES_KANBAN_WORKSPACE"] = workspace
+    backend_binding = _backend_owned_project_binding(task, board)
+    if backend_binding is not None:
+        env["HERMES_KANBAN_BACKEND_ROOT"] = str(backend_binding["default_workdir"])
+        if task.project_id:
+            env["HERMES_KANBAN_PROJECT_ROOT"] = str(backend_binding["default_workdir"])
+            env["HERMES_KANBAN_PROJECT_SLUG"] = str(backend_binding.get("project_slug") or "")
     # Tag the session `kanban` so session-browsing surfaces filter it out by
     # source instead of rendering one sidebar row per attempt.
     env["HERMES_SESSION_SOURCE"] = "kanban"
@@ -2217,7 +2282,12 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # home) and build_context_files_prompt (#34619 — workers loaded the dispatching gateway's AGENTS.md
     # instead of the task's). Setting it to the workspace fixes both: the workspace is where the task's work
     # actually happens.
-    if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
+    if (
+        backend_binding is None
+        and workspace
+        and os.path.isabs(workspace)
+        and os.path.isdir(workspace)
+    ):
         env["TERMINAL_CWD"] = workspace
     if task.branch_name:
         env["HERMES_KANBAN_BRANCH"] = task.branch_name
@@ -2262,9 +2332,15 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     env = systemd_user_bus_env(env)
     log_f = _open_worker_log(task, board)
     try:
+        # A backend-owned workspace may not exist on the controller at all.
+        # Launch from the existing control-plane home; worker preflight moves
+        # terminal/session cwd only after backend validation succeeds.
+        neutral_cwd = str(_kb.kanban_home()) if backend_binding is not None else (
+            workspace if os.path.isdir(workspace) else None
+        )
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
             cmd,
-            cwd=workspace if os.path.isdir(workspace) else None,
+            cwd=neutral_cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_f,
             stderr=subprocess.STDOUT,

@@ -309,10 +309,14 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
 
     raw_task_id = task_id or "default"
     task_id = _resolve_container_task_id(raw_task_id)
+    # File-operation cwd is session/task state even when the terminal
+    # environment itself is shared.  Cache the lightweight wrapper by raw id;
+    # only the expensive environment remains keyed by ``task_id``.
+    cache_key = raw_task_id
 
     # Fast path: cached AND the environment is still alive (cleanup thread may have killed it).
     with _file_ops_lock:
-        cached = _file_ops_cache.get(task_id)
+        cached = _file_ops_cache.get(cache_key)
     if cached is not None:
         with _env_lock:
             if task_id in _active_environments:
@@ -334,7 +338,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 except Exception:
                     pass
             with _file_ops_lock:
-                _file_ops_cache.pop(task_id, None)
+                _file_ops_cache.pop(cache_key, None)
 
     with _creation_locks_lock:
         task_lock = _creation_locks.setdefault(task_id, threading.Lock())
@@ -353,9 +357,16 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             _start_cleanup_thread()
             logger.info("%s environment ready for task %s", env_type, task_id[:8])
 
-    file_ops = ShellFileOperations(terminal_env)
+    from tools.terminal_tool import resolve_task_overrides
+
+    task_cwd = resolve_task_overrides(raw_task_id).get("cwd")
+    file_ops = ShellFileOperations(
+        terminal_env,
+        cwd=task_cwd,
+        authoritative_cwd=bool(task_cwd),
+    )
     with _file_ops_lock:
-        _file_ops_cache[task_id] = file_ops
+        _file_ops_cache[cache_key] = file_ops
     return file_ops
 
 

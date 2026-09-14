@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setApiRequestConnection } from '@/hermes'
+import { $gatewayActivationGeneration } from '@/store/gateway'
 import { $connection } from '@/store/session'
 
-import { desktopGit } from './desktop-git'
+import { desktopGit, setDesktopGitFilesystemScope } from './desktop-git'
 
 const repoStatus = vi.fn(async () => ({ branch: 'main' }))
 const worktreeList = vi.fn(async () => [{ branch: 'main', detached: false, isMain: true, locked: false, path: '/r' }])
@@ -35,6 +36,7 @@ describe('desktop git facade', () => {
   beforeEach(() => {
     vi.stubGlobal('window', { hermesDesktop: { api, git: localGit } })
     $connection.set(null)
+    setDesktopGitFilesystemScope('local')
   })
 
   afterEach(() => {
@@ -42,12 +44,50 @@ describe('desktop git facade', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     $connection.set(null)
+    setDesktopGitFilesystemScope('unknown')
   })
 
   it('returns undefined after the renderer global is torn down', () => {
     vi.stubGlobal('window', undefined)
 
     expect(desktopGit()).toBeUndefined()
+  })
+
+  it.each(['non_local', 'unknown'] as const)(
+    'fails closed for every controller and gateway-host git action when terminal filesystem is %s',
+    scope => {
+      $connection.set({ mode: 'remote' } as never)
+      setDesktopGitFilesystemScope(scope)
+
+      expect(desktopGit()).toBeUndefined()
+      expect(api).not.toHaveBeenCalled()
+      expect(repoStatus).not.toHaveBeenCalled()
+    }
+  )
+
+  it('rejects queued git calls after capability invalidation even when local returns', async () => {
+    const git = desktopGit()!
+    setDesktopGitFilesystemScope('unknown')
+    setDesktopGitFilesystemScope('local')
+    await expect(git.repoStatus('/old')).rejects.toThrow('stale')
+    await expect(git.review.stage('/old', 'a')).rejects.toThrow('stale')
+    expect(repoStatus).not.toHaveBeenCalled()
+    expect(localGit.review.stage).not.toHaveBeenCalled()
+  })
+
+  it('rejects a captured facade after a profile round trip', async () => {
+    const git = desktopGit()!
+    $connection.set({ mode: 'local', profile: 'other' } as never)
+    $connection.set(null)
+    await expect(git.repoStatus('/old')).rejects.toThrow('stale')
+    expect(repoStatus).not.toHaveBeenCalled()
+  })
+
+  it('rejects queued git before the new gateway connection is published', async () => {
+    const git = desktopGit()!
+    $gatewayActivationGeneration.set($gatewayActivationGeneration.get() + 1)
+    await expect(git.repoStatus('/old')).rejects.toThrow('stale')
+    expect(repoStatus).not.toHaveBeenCalled()
   })
 
   it('uses Electron git locally', async () => {

@@ -2,6 +2,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesReadDirResult } from '@/global'
+import { setProjectFilesystemScope } from '@/lib/project-filesystem-capability'
 import { $connection } from '@/store/session'
 import { notifyWorkspaceChanged } from '@/store/workspace-events'
 
@@ -12,6 +13,7 @@ const readDir = vi.fn<(path: string) => Promise<HermesReadDirResult>>()
 
 beforeEach(() => {
   $connection.set(null)
+  setProjectFilesystemScope('local')
   resetProjectTreeState()
   readDir.mockReset()
   ;(window as unknown as { hermesDesktop: { readDir: typeof readDir } }).hermesDesktop = { readDir }
@@ -19,6 +21,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  setProjectFilesystemScope('unknown')
   $connection.set(null)
   resetProjectTreeState()
   delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
@@ -29,6 +32,48 @@ function ok(entries: { name: string; path: string; isDirectory: boolean }[]): He
 }
 
 describe('useProjectTree', () => {
+  it.each(['unknown', 'non_local'] as const)('never sanitizes a denied %s root on the host', async scope => {
+    const sanitizeWorkspaceCwd = vi.fn(async () => ({ cwd: '/fallback', sanitized: true }))
+
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = { readDir, sanitizeWorkspaceCwd }
+    setProjectFilesystemScope(scope)
+    const { result } = renderHook(() => useProjectTree('/remote'))
+    await waitFor(() => expect(result.current.rootLoading).toBe(false))
+    expect(sanitizeWorkspaceCwd).not.toHaveBeenCalled()
+    expect(readDir).not.toHaveBeenCalled()
+  })
+
+  it('does not read a fallback after its sanitizer outlives the route', async () => {
+    let resolveSanitize!: (value: { cwd: string; sanitized: boolean }) => void
+
+    const sanitizeWorkspaceCwd = vi.fn(
+      () =>
+        new Promise<{ cwd: string; sanitized: boolean }>(resolve => {
+          resolveSanitize = resolve
+        })
+    )
+
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = { readDir, sanitizeWorkspaceCwd }
+    readDir.mockResolvedValue({ entries: [], error: 'ENOENT' })
+    renderHook(() => useProjectTree('/old'))
+    await waitFor(() => expect(sanitizeWorkspaceCwd).toHaveBeenCalled())
+    await act(async () => {
+      $connection.set({ mode: 'local', profile: 'other' } as never)
+      resolveSanitize({ cwd: '/fallback', sanitized: true })
+    })
+    expect(readDir).not.toHaveBeenCalledWith('/fallback')
+  })
+
+  it('clears a visible tree immediately when filesystem capability becomes unknown', async () => {
+    readDir.mockResolvedValue(ok([{ name: 'secret', path: '/old/secret', isDirectory: false }]))
+    const { result } = renderHook(() => useProjectTree('/old'))
+    await waitFor(() => expect(result.current.data).toHaveLength(1))
+    act(() => setProjectFilesystemScope('unknown'))
+    expect(result.current.data).toEqual([])
+    act(() => setProjectFilesystemScope('local'))
+    await waitFor(() => expect(result.current.data).toHaveLength(1))
+  })
+
   it('starts empty when cwd is blank and skips IPC', async () => {
     const { result } = renderHook(() => useProjectTree(''))
 

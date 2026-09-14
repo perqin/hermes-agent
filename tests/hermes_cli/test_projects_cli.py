@@ -57,5 +57,72 @@ def test_rename_and_archive(tmp_path):
         assert len(pdb.list_projects(conn)) == 1
 
 
+def test_cli_folder_mutations_use_canonical_resolver_before_database_write(monkeypatch, capsys):
+    mapping = {"repo": "/remote/repo", "other": "/remote/other"}
+    monkeypatch.setattr(
+        projects_cmd, "resolve_project_folders",
+        lambda paths, primary_path=None, **_kw: (
+            [mapping[path] for path in paths], mapping.get(primary_path) if primary_path else None),
+    )
+    monkeypatch.setattr(
+        projects_cmd, "resolve_project_folder",
+        lambda path, **_kw: mapping[path],
+    )
+    monkeypatch.setattr(
+        projects_cmd, "resolve_project_folder_reference",
+        lambda _project, path, **_kw: mapping.get(path, path),
+    )
+
+    assert _run(["create", "Remote", "repo"]) == 0
+    assert _run(["add-folder", "remote", "other", "--primary"]) == 0
+    assert "/remote/other" in capsys.readouterr().out
+    assert _run(["set-primary", "remote", "repo"]) == 0
+    assert _run(["remove-folder", "remote", "other"]) == 0
+
+    with pdb.connect_closing() as conn:
+        project = pdb.get_project(conn, "remote")
+        assert project.primary_path == "/remote/repo"
+        assert [folder.path for folder in project.folders] == ["/remote/repo"]
+
+    monkeypatch.setattr(
+        projects_cmd, "resolve_project_folders",
+        lambda *_a, **_kw: (_ for _ in ()).throw(ValueError("remote resolution failed")),
+    )
+    assert _run(["create", "Broken", "missing"]) == 2
+    with pdb.connect_closing() as conn:
+        assert pdb.get_project(conn, "broken") is None
+
+
+def test_cli_preserves_posix_backslash_basenames_for_remove_and_set_primary(monkeypatch):
+    primary = "/remote/primary\\"
+    secondary = "/remote/secondary\\"
+    mapping = {"primary": primary, "secondary": secondary}
+    monkeypatch.setattr(
+        projects_cmd,
+        "resolve_project_folders",
+        lambda paths, primary_path=None, **_kw: (
+            [mapping[path] for path in paths], mapping.get(primary_path) if primary_path else None),
+    )
+    monkeypatch.setattr(
+        projects_cmd,
+        "resolve_project_folder",
+        lambda path, **_kw: mapping[path],
+    )
+    monkeypatch.setattr(
+        projects_cmd,
+        "resolve_project_folder_reference",
+        lambda _project, path, **_kw: mapping.get(path, path),
+    )
+
+    assert _run(["create", "Slash literals", "primary", "secondary"]) == 0
+    assert _run(["set-primary", "slash-literals", secondary]) == 0
+    assert _run(["remove-folder", "slash-literals", primary]) == 0
+
+    with pdb.connect_closing() as conn:
+        project = pdb.get_project(conn, "slash-literals")
+        assert project.primary_path == secondary
+        assert [folder.path for folder in project.folders] == [secondary]
+
+
 
 

@@ -772,6 +772,12 @@ export const zhHant: Translations = {
     workspacePathDir: "工作區路徑（必填，例如 ~/projects/my-app）",
     workspacePathOptional:
       "工作區路徑（選填，留空則依負責人推導）",
+    projectDirectoryExplanation:
+      "儲存時，絕對路徑會在此請求設定檔的終端環境中解析。",
+    projectDirectoryPending: "正在終端環境中驗證專案目錄…",
+    projectDirectoryValidationError: "專案目錄驗證失敗：{error}",
+    projectDirectoryOverrideHint: "新任務會繼承此目錄作為預設工作區；每個任務仍可在建立對話框中覆寫它。",
+    saving: "正在儲存…",
     logTruncated: "（顯示最後 100 KB — 完整日誌位於 ",
     logAt: "）",
   },

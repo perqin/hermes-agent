@@ -774,6 +774,12 @@ export const uk: Translations = {
     workspacePathDir: "шлях робочої області (обов'язково, напр. ~/projects/my-app)",
     workspacePathOptional:
       "шлях робочої області (необов'язково, виводиться з виконавця, якщо порожньо)",
+    projectDirectoryExplanation:
+      "Під час збереження абсолютний шлях визначається в термінальному середовищі профілю цього запиту.",
+    projectDirectoryPending: "Перевірка каталогу проєкту в термінальному середовищі…",
+    projectDirectoryValidationError: "Не вдалося перевірити каталог проєкту: {error}",
+    projectDirectoryOverrideHint: "Нові завдання успадковують його як стандартний робочий простір; для кожного завдання його можна змінити в діалозі створення.",
+    saving: "Збереження…",
     logTruncated: "(показано останні 100 KB — повний журнал у ",
     logAt: ")",
   },

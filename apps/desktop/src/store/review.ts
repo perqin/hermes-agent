@@ -9,10 +9,12 @@ import { desktopGit } from '@/lib/desktop-git'
 import { isExcludedPath } from '@/lib/excluded-paths'
 import { requestOneShot } from '@/lib/oneshot'
 import { Codecs, persistentAtom } from '@/lib/persisted'
+import { onProjectFilesystemCapabilityInvalidated } from '@/lib/project-filesystem-capability'
+import { $gatewayActivationGeneration } from '@/store/gateway'
 
 import { refreshRepoStatus, repoStatusForCwd } from './coding-status'
 import { stampSessionPrBranch } from './pull-requests'
-import { $busy, $currentCwd, $selectedStoredSessionId, $sessions } from './session'
+import { $busy, $connection, $currentCwd, $selectedStoredSessionId, $sessions } from './session'
 import { $workspaceChangeTick } from './workspace-events'
 
 // State for the review pane: the working-tree changed-file list, the selected
@@ -97,9 +99,23 @@ export const $reviewScopeTarget = atom('main')
 
 /** The repo the pane is reading right now: its pinned scope, else the active
  *  session's cwd. Exported for pane helpers that join repo-relative paths. */
-export const reviewRepoCwd = (): null | string => $reviewScopeCwd.get()?.trim() || $currentCwd.get()?.trim() || null
+export const reviewRepoCwd = (): null | string => {
+  const scoped = $reviewScopeCwd.get()
+  const current = $currentCwd.get()
+
+  return scoped?.trim() ? scoped : current?.trim() ? current : null
+}
 
 const repoCwd = reviewRepoCwd
+let reviewRouteInvalidated = false
+let reviewOwnerGeneration = 0
+
+/** Capture the pane owner for caller-side continuations, not just IPC writes. */
+export function captureReviewOwner(): () => boolean {
+  const owner = reviewOwnerGeneration
+
+  return () => owner === reviewOwnerGeneration
+}
 
 type ReviewBridge = NonNullable<NonNullable<NonNullable<Window['hermesDesktop']>['git']>['review']>
 let reviewRefreshSeq = 0
@@ -109,11 +125,19 @@ let shipInfoLastCheckedAt = 0
 
 // The two things every review op needs: the repo cwd + the IPC bridge. Null when
 // either is missing (no session, remote backend), so callers bail in one line.
-function reviewCtx(): { cwd: string; review: ReviewBridge } | null {
+function reviewCtx(): { cwd: string; review: ReviewBridge; isCurrent: () => boolean } | null {
+  if (reviewRouteInvalidated) {
+    return null
+  }
+
   const cwd = repoCwd()
   const review = desktopGit()?.review
 
-  return cwd && review ? { cwd, review } : null
+  const owner = reviewOwnerGeneration
+  const target = $reviewScopeTarget.get()
+  const isCurrent = () => owner === reviewOwnerGeneration && repoCwd() === cwd && $reviewScopeTarget.get() === target
+
+  return cwd && review ? { cwd, review, isCurrent } : null
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -192,7 +216,10 @@ function scheduleReviewRefresh(): void {
   }, REVIEW_REFRESH_DEBOUNCE_MS)
 }
 
+let reviewDiffSeq = 0
+
 export async function selectReviewFile(file: HermesReviewFile): Promise<void> {
+  const seq = ++reviewDiffSeq
   $reviewSelectedPath.set(file.path)
 
   const ctx = reviewCtx()
@@ -208,21 +235,22 @@ export async function selectReviewFile(file: HermesReviewFile): Promise<void> {
   try {
     const diff = await ctx.review.diff(ctx.cwd, file.path, 'uncommitted', null, file.staged)
 
-    if ($reviewSelectedPath.get() === file.path) {
+    if (seq === reviewDiffSeq && repoCwd() === ctx.cwd && $reviewSelectedPath.get() === file.path) {
       $reviewDiff.set(diff || '')
     }
   } catch {
-    if ($reviewSelectedPath.get() === file.path) {
+    if (seq === reviewDiffSeq && repoCwd() === ctx.cwd && $reviewSelectedPath.get() === file.path) {
       $reviewDiff.set('')
     }
   } finally {
-    if ($reviewSelectedPath.get() === file.path) {
+    if (seq === reviewDiffSeq && repoCwd() === ctx.cwd && $reviewSelectedPath.get() === file.path) {
       $reviewDiffLoading.set(false)
     }
   }
 }
 
 export function clearReviewSelection(): void {
+  reviewDiffSeq += 1
   $reviewSelectedPath.set(null)
   $reviewDiff.set(null)
   $reviewDiffLoading.set(false)
@@ -265,7 +293,8 @@ function refreshShipInfoIfStale(): void {
  *  session's cwd when null — see `$reviewScopeCwd`. Keep the originating
  *  composer target alongside it for agent-ship actions. */
 export function openReview(scopeCwd: null | string = null, scopeTarget = 'main'): void {
-  $reviewScopeCwd.set(scopeCwd?.trim() || null)
+  reviewRouteInvalidated = false
+  $reviewScopeCwd.set(scopeCwd?.trim() ? scopeCwd : null)
   $reviewScopeTarget.set(scopeTarget.trim() || 'main')
   $reviewOpen.set(true)
   void refreshReview()
@@ -274,6 +303,7 @@ export function openReview(scopeCwd: null | string = null, scopeTarget = 'main')
 
 export function closeReview(): void {
   $reviewOpen.set(false)
+  onReviewRepoMoved()
   $reviewScopeCwd.set(null)
   $reviewScopeTarget.set('main')
   clearReviewSelection()
@@ -287,7 +317,7 @@ export function toggleReview(scopeCwd: null | string = null, scopeTarget = 'main
     const target = scopeTarget.trim() || 'main'
 
     const originChanged =
-      ($reviewScopeCwd.get() ?? null) !== (scopeCwd?.trim() || null) || $reviewScopeTarget.get() !== target
+      ($reviewScopeCwd.get() ?? null) !== (scopeCwd?.trim() ? scopeCwd : null) || $reviewScopeTarget.get() !== target
 
     if (!$reviewOpen.get() || originChanged) {
       openReview(scopeCwd, target)
@@ -321,11 +351,14 @@ export function revealReview(scopeCwd: null | string = null, scopeTarget = 'main
 
   if (!wasOpen) {
     openReview(scopeCwd, target)
-  } else if (($reviewScopeCwd.get() ?? null) !== (scopeCwd?.trim() || null) || $reviewScopeTarget.get() !== target) {
+  } else if (
+    ($reviewScopeCwd.get() ?? null) !== (scopeCwd?.trim() ? scopeCwd : null) ||
+    $reviewScopeTarget.get() !== target
+  ) {
     // Already open but on another worktree's diff — re-home it. The scope
     // subscription below clears the stale list and re-probes. Keep the
     // originating composer target alongside the cwd for the agent-ship action.
-    $reviewScopeCwd.set(scopeCwd?.trim() || null)
+    $reviewScopeCwd.set(scopeCwd?.trim() ? scopeCwd : null)
     $reviewScopeTarget.set(target)
   }
 
@@ -367,7 +400,12 @@ export async function openReviewForPath(
   scopeTarget = 'main'
 ): Promise<void> {
   revealReview(scopeCwd, scopeTarget)
+  const ctx = reviewCtx()
   await refreshReview()
+
+  if (!ctx?.isCurrent()) {
+    return
+  }
 
   const file = matchReviewFile($reviewFiles.get(), path)
 
@@ -380,8 +418,17 @@ export async function openReviewForPath(
 
 // Run a git mutation then re-sync both the review list and the rail's +/- (the
 // working tree changed). A failure is swallowed by the caller's notify wrapper.
-async function afterMutation(): Promise<void> {
+async function afterMutation(ctx: NonNullable<ReturnType<typeof reviewCtx>>): Promise<void> {
+  if (!ctx.isCurrent()) {
+    return
+  }
+
   await refreshReview()
+
+  if (!ctx.isCurrent()) {
+    return
+  }
+
   void refreshRepoStatus(repoCwd())
 
   const selected = $reviewSelectedPath.get()
@@ -394,18 +441,54 @@ async function afterMutation(): Promise<void> {
 }
 
 export async function stageReviewFile(path: null | string): Promise<void> {
-  await desktopGit()?.review?.stage(repoCwd() ?? '', path)
-  await afterMutation()
+  const ctx = reviewCtx()
+
+  if (!ctx) {
+    return
+  }
+
+  try {
+    await ctx.review.stage(ctx.cwd, path)
+    await afterMutation(ctx)
+  } catch (error) {
+    if (ctx.isCurrent()) {
+      throw error
+    }
+  }
 }
 
 export async function unstageReviewFile(path: null | string): Promise<void> {
-  await desktopGit()?.review?.unstage(repoCwd() ?? '', path)
-  await afterMutation()
+  const ctx = reviewCtx()
+
+  if (!ctx) {
+    return
+  }
+
+  try {
+    await ctx.review.unstage(ctx.cwd, path)
+    await afterMutation(ctx)
+  } catch (error) {
+    if (ctx.isCurrent()) {
+      throw error
+    }
+  }
 }
 
 export async function revertReviewFile(path: null | string): Promise<void> {
-  await desktopGit()?.review?.revert(repoCwd() ?? '', path)
-  await afterMutation()
+  const ctx = reviewCtx()
+
+  if (!ctx) {
+    return
+  }
+
+  try {
+    await ctx.review.revert(ctx.cwd, path)
+    await afterMutation(ctx)
+  } catch (error) {
+    if (ctx.isCurrent()) {
+      throw error
+    }
+  }
 }
 
 // Revert is destructive (discards working-tree edits with no undo), so it always
@@ -413,23 +496,27 @@ export async function revertReviewFile(path: null | string): Promise<void> {
 // means "revert all"; `undefined` means no confirm is open. We wrap the path in
 // an object so the `null` ("all") case is distinguishable from "closed".
 export const $reviewRevertTarget = atom<{ path: null | string } | undefined>(undefined)
+let revertOwner: ReturnType<typeof reviewCtx> = null
 
 /** Open the revert confirm for a single file, or `null` for all changes. */
 export function requestRevert(path: null | string): void {
+  revertOwner = reviewCtx()
   $reviewRevertTarget.set({ path })
 }
 
 export function cancelRevert(): void {
+  revertOwner = null
   $reviewRevertTarget.set(undefined)
 }
 
 /** Confirm the pending revert (closes the dialog, then performs it). */
 export async function confirmRevert(): Promise<void> {
   const target = $reviewRevertTarget.get()
+  const owner = revertOwner
 
-  $reviewRevertTarget.set(undefined)
+  cancelRevert()
 
-  if (target) {
+  if (target && owner?.isCurrent()) {
     await revertReviewFile(target.path)
   }
 }
@@ -437,13 +524,20 @@ export async function confirmRevert(): Promise<void> {
 // ── Ship flow (commit / push / PR) ───────────────────────────────────────────
 
 // Serialize ship actions behind one busy flag so the bar can't double-fire.
-async function runShip<T>(action: () => Promise<T>): Promise<T> {
+async function runShip(action: () => Promise<void>): Promise<void> {
+  const owner = reviewOwnerGeneration
   $reviewShipBusy.set(true)
 
   try {
     return await action()
+  } catch (error) {
+    if (owner === reviewOwnerGeneration) {
+      throw error
+    }
   } finally {
-    $reviewShipBusy.set(false)
+    if (owner === reviewOwnerGeneration) {
+      $reviewShipBusy.set(false)
+    }
   }
 }
 
@@ -456,7 +550,17 @@ export async function commitChanges(message: string, opts: { push?: boolean } = 
 
   await runShip(async () => {
     await ctx.review.commit(ctx.cwd, message.trim(), Boolean(opts.push))
+
+    if (!ctx.isCurrent()) {
+      return
+    }
+
     await refreshReview()
+
+    if (!ctx.isCurrent()) {
+      return
+    }
+
     void refreshRepoStatus(repoCwd())
     void refreshShipInfo()
   })
@@ -485,7 +589,7 @@ export async function generateCommitMessage(previous = ''): Promise<string> {
   }
 
   const gen = (commitGenSeq += 1)
-  const live = () => gen === commitGenSeq
+  const live = () => gen === commitGenSeq && ctx.isCurrent()
 
   $reviewCommitMsgBusy.set(true)
 
@@ -503,6 +607,12 @@ export async function generateCommitMessage(previous = ''): Promise<string> {
     })
 
     return live() ? text : ''
+  } catch (error) {
+    if (live()) {
+      throw error
+    }
+
+    return ''
   } finally {
     if (live()) {
       $reviewCommitMsgBusy.set(false)
@@ -519,6 +629,11 @@ export async function pushChanges(): Promise<void> {
 
   await runShip(async () => {
     await ctx.review.push(ctx.cwd)
+
+    if (!ctx.isCurrent()) {
+      return
+    }
+
     void refreshShipInfo()
   })
 }
@@ -540,8 +655,22 @@ export async function createOrOpenPr(): Promise<void> {
     return
   }
 
+  const owner = reviewOwnerGeneration
+  const sessionId = $selectedStoredSessionId.get()
+  const session = $sessions.get().find(s => s.id === sessionId)
+  const target = $reviewScopeTarget.get()
+
   await runShip(async () => {
     const { url } = await ctx.review.createPr(ctx.cwd)
+
+    if (
+      owner !== reviewOwnerGeneration ||
+      repoCwd() !== ctx.cwd ||
+      $reviewScopeTarget.get() !== target ||
+      $selectedStoredSessionId.get() !== sessionId
+    ) {
+      return
+    }
 
     if (url) {
       void window.hermesDesktop?.openExternal?.(url)
@@ -551,7 +680,6 @@ export async function createOrOpenPr(): Promise<void> {
     // moved since, so bind the conversation to the branch the PR actually came
     // from — otherwise a session that began on trunk badges whatever else lives
     // on trunk, or nothing.
-    const session = $sessions.get().find(s => s.id === $selectedStoredSessionId.get())
     const branch = repoStatusForCwd(ctx.cwd).get()?.branch
 
     if (session?.git_repo_root && branch) {
@@ -593,6 +721,15 @@ $busy.subscribe(busy => {
 // straight to its loading skeleton instead of blipping the previous repo's
 // diff into the new one.
 function onReviewRepoMoved(): void {
+  cancelRevert()
+  reviewOwnerGeneration += 1
+  reviewRefreshSeq += 1
+  reviewDiffSeq += 1
+  shipInfoSeq += 1
+  cancelCommitMessage()
+  $reviewDiffLoading.set(false)
+  $reviewShipBusy.set(false)
+
   if ($reviewOpen.get()) {
     clearReviewSelection()
     $reviewFiles.set([])
@@ -603,12 +740,45 @@ function onReviewRepoMoved(): void {
 }
 
 $currentCwd.subscribe(() => {
+  reviewRouteInvalidated = false
+
   if (!$reviewScopeCwd.get()) {
     onReviewRepoMoved()
   }
 })
 
 let prevScopeCwd = $reviewScopeCwd.get()
+
+function invalidateReviewRoute(): void {
+  reviewOwnerGeneration += 1
+  $reviewShipBusy.set(false)
+  reviewRouteInvalidated = true
+  reviewRefreshSeq += 1
+  shipInfoSeq += 1
+  closeReview()
+  cancelRevert()
+  cancelCommitMessage()
+  $reviewFiles.set([])
+  $reviewLoading.set(false)
+  $reviewShipInfo.set({ ghReady: false, pr: null })
+}
+
+$connection.listen(invalidateReviewRoute)
+$gatewayActivationGeneration.listen(invalidateReviewRoute)
+onProjectFilesystemCapabilityInvalidated(invalidateReviewRoute)
+$reviewScopeTarget.listen(onReviewRepoMoved)
+$selectedStoredSessionId.listen(() => {
+  if (!$reviewScopeCwd.get()) {
+    onReviewRepoMoved()
+  } else {
+    // Main-session selection still owns PR stamping, but must not yank a
+    // tile's pinned file list or diff. Retire mutation completions only.
+    reviewOwnerGeneration += 1
+    cancelRevert()
+    cancelCommitMessage()
+    $reviewShipBusy.set(false)
+  }
+})
 
 $reviewScopeCwd.subscribe(scope => {
   if (scope !== prevScopeCwd) {

@@ -9,6 +9,7 @@ returns a ``TurnContext`` with only the locals the loop reads back.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -33,6 +34,20 @@ logger = logging.getLogger(__name__)
 def _str_attr(agent: Any, name: str) -> str:
     """``getattr(agent, name, "") or ""`` — route facts read off partial agents/doubles."""
     return getattr(agent, name, "") or ""
+
+
+def _default_turn_task_id() -> str:
+    """Keep a dispatcher-owned Kanban worker on its preflighted environment."""
+    kanban_task = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if kanban_task:
+        try:
+            from agent.delegation_context import is_dispatcher_owned_worker_context
+
+            if is_dispatcher_owned_worker_context():
+                return kanban_task
+        except Exception:
+            pass
+    return str(uuid.uuid4())
 
 
 def _preflight_request_tokens(
@@ -466,8 +481,10 @@ def _bind_turn_identity(
     agent._persist_user_message_override = persist_user_message
     agent._persist_user_message_timestamp = persist_user_timestamp
     agent._persist_user_message_platform_id = persist_user_platform_id
-    # Unique task_id when not provided isolates VMs between tasks.
-    effective_task_id = task_id or str(uuid.uuid4())
+    # Unique task_id when not provided isolates VMs between tasks. A dispatcher
+    # worker is the exception: its preflight materialized the workspace in the
+    # Kanban task's cached environment, so every turn must reuse that exact key.
+    effective_task_id = task_id or _default_turn_task_id()
     agent._current_task_id = effective_task_id
     agent._process_owner_task_ids = {*getattr(agent, "_process_owner_task_ids", ()), effective_task_id}
     turn_id = str(getattr(agent, "_relay_pending_turn_id", "") or "") or (

@@ -138,18 +138,42 @@ def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
             ((s, c) for s, c in _sessions.items()
              if c.get("session_key") == key or getattr(c.get("agent"), "session_id", None) == key),
             ("", None))
-    resolved = os.path.abspath(os.path.expanduser(str(path)))
-    if session is None or not os.path.isdir(resolved):
+    if session is None:
         return
+    from tools.terminal_tool import acquire_terminal_environment
+
+    env = acquire_terminal_environment(task_id=key)
+    filesystem_local = getattr(env, "is_local", False) is True
+    if filesystem_local:
+        resolved = os.path.abspath(os.path.expanduser(str(path)))
+        if not os.path.isdir(resolved):
+            raise ValueError(f"project workspace is not a directory: {path}")
+    else:
+        # Project resolution already proved this canonical path in this exact session environment.
+        resolved = str(path)
     # explicit switch supersedes a settle-adopted cwd
-    session.update(cwd=resolved, explicit_cwd=True, cwd_from_settle=False)
+    session.update(
+        cwd=resolved, explicit_cwd=True, cwd_from_settle=False,
+        filesystem_local=filesystem_local,
+    )
     _register_session_cwd(session)
-    _persist_session_cwd_and_schedule_git_meta(session, resolved)
+    if filesystem_local:
+        _persist_session_cwd_and_schedule_git_meta(session, resolved)
+    else:
+        # Persist the authoritative cwd without launching a controller-host Git probe.
+        with _session_db(session) as owner_db:
+            if owner_db is not None:
+                owner_db.update_session_cwd(session.get("session_key", ""), resolved)
     try:
-        agent = session.get("agent")
-        info = _session_info(agent, session) if agent is not None else {
-            "cwd": resolved, "branch": git_probe.branch(resolved),
-            "project": _project_info_for_cwd(resolved), "lazy": True}
+        if filesystem_local:
+            agent = session.get("agent")
+            info = _session_info(agent, session) if agent is not None else {
+                "cwd": resolved, "branch": git_probe.branch(resolved),
+                "project": _project_info_for_cwd(resolved), "lazy": True}
+        else:
+            info = {
+                "cwd": resolved, "branch": "",
+                "project": _project_info_for_cwd(resolved), "lazy": True}
         _emit("session.info", sid, info)
     except Exception:
         logger.debug("failed to emit session.info after project workspace move", exc_info=True)

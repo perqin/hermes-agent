@@ -19,6 +19,7 @@ import {
   $reviewShipBusy,
   $reviewShipInfo,
   cancelCommitMessage,
+  captureReviewOwner,
   type CommitAction,
   commitChanges,
   createOrOpenPr,
@@ -58,9 +59,18 @@ export function ReviewShipBar() {
       return
     }
 
+    const isCurrent = captureReviewOwner()
     void commitChanges(message, { push: action === 'commitPush' })
-      .then(() => setMessage(''))
-      .catch(err => notifyError(err, c.commit))
+      .then(() => {
+        if (isCurrent()) {
+          setMessage('')
+        }
+      })
+      .catch(err => {
+        if (isCurrent()) {
+          notifyError(err, c.commit)
+        }
+      })
   }
 
   // Draft the commit message off-thread (VS Code style); pass the current text
@@ -70,9 +80,18 @@ export function ReviewShipBar() {
       return
     }
 
+    const isCurrent = captureReviewOwner()
     void generateCommitMessage(message)
-      .then(text => text && setMessage(text))
-      .catch(err => notifyError(err, c.generateCommitMessage))
+      .then(text => {
+        if (isCurrent() && text) {
+          setMessage(text)
+        }
+      })
+      .catch(err => {
+        if (isCurrent()) {
+          notifyError(err, c.generateCommitMessage)
+        }
+      })
   }
 
   return (
@@ -147,7 +166,14 @@ export function ReviewShipBar() {
               aria-label={prLabel}
               className="size-7 text-muted-foreground/80 hover:text-foreground"
               disabled={!ship.ghReady || busy}
-              onClick={() => void createOrOpenPr().catch(err => notifyError(err, prLabel))}
+              onClick={() => {
+                const isCurrent = captureReviewOwner()
+                void createOrOpenPr().catch(err => {
+                  if (isCurrent()) {
+                    notifyError(err, prLabel)
+                  }
+                })
+              }}
               size="icon-xs"
               variant="ghost"
             >

@@ -5,6 +5,7 @@ import type { TerminalBackendsResponse } from '@/types/hermes'
 
 const getTerminalBackends = vi.fn()
 const selectTerminalBackend = vi.fn()
+const invalidateProjectFilesystemCapabilities = vi.fn()
 
 vi.mock('@/hermes', () => ({
   getTerminalBackends: () => getTerminalBackends(),
@@ -14,6 +15,10 @@ vi.mock('@/hermes', () => ({
 vi.mock('@/store/notifications', () => ({
   notify: vi.fn(),
   notifyError: vi.fn()
+}))
+
+vi.mock('@/store/projects', () => ({
+  invalidateProjectFilesystemCapabilities: () => invalidateProjectFilesystemCapabilities()
 }))
 
 function backends(overrides: Partial<TerminalBackendsResponse> = {}): TerminalBackendsResponse {
@@ -98,6 +103,7 @@ describe('TerminalBackendPanel', () => {
 
     await waitFor(() => expect(selectTerminalBackend).toHaveBeenCalledWith('ssh'))
     await waitFor(() => expect(onConfiguredChange).toHaveBeenCalled())
+    expect(invalidateProjectFilesystemCapabilities).toHaveBeenCalledOnce()
     // Active highlight moves without a refetch.
     const ssh = screen.getByRole('button', { name: /SSH/ })
     expect(ssh.getAttribute('aria-pressed')).toBe('true')

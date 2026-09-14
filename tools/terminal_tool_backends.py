@@ -191,6 +191,21 @@ def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
             env_obj._hermes_backend_name = provider.name.strip().lower()
         except AttributeError:
             pass
+        # Provider metadata is the single contract for both declarative UI and live runtime
+        # locality. Only a literal bool is accepted; malformed values fail closed to non-local.
+        from agent.terminal_env_registry import provider_filesystem_locality
+
+        filesystem_local = provider_filesystem_locality(env_type) is True
+        try:
+            env_obj.is_local = filesystem_local
+        except (AttributeError, TypeError):
+            # Read-only environment capabilities are acceptable only when they already agree.
+            # Otherwise refusing creation is safer than granting contradictory local semantics.
+            if getattr(env_obj, "is_local", None) is not filesystem_local:
+                raise ValueError(
+                    f"Terminal environment provider {provider.name!r} returned an environment "
+                    "whose filesystem locality cannot be made consistent with provider metadata"
+                ) from None
         return env_obj
     try:
         from agent.terminal_env_registry import plugin_backend_names
@@ -205,6 +220,19 @@ def _build_plugin_env(*, env_type, image, cwd, timeout, cc, task_id, **_):
 _ENV_BUILDERS = {"local": _build_local_env, "docker": _build_docker_env, "singularity": _build_singularity_env,
                  "modal": _build_modal_env, "daytona": _build_daytona_env, "vercel_sandbox": _build_vercel_env,
                  "ssh": _build_ssh_env}
+
+
+def terminal_filesystem_scope(env_type: str) -> str:
+    """Lightweight filesystem-locality metadata; never creates a sandbox."""
+    name = str(env_type or "").strip().lower()
+    if name in _ENV_BUILDERS:
+        return "local" if _ENV_BUILDERS[name] is _build_local_env else "non_local"
+    try:
+        from agent.terminal_env_registry import provider_filesystem_scope
+
+        return provider_filesystem_scope(name)
+    except Exception:
+        return "unknown"
 
 
 def _create_environment(env_type: str, image: str, cwd: str, timeout: int,

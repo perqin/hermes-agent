@@ -4,16 +4,20 @@ import { setApiRequestConnection } from '@/api/client'
 import { $connection } from '@/store/session'
 
 import {
+  cancelDesktopFsRemotePicker,
+  captureDesktopFsWriteRoute,
   desktopDefaultCwd,
   desktopFileDiff,
   desktopFsCacheKey,
   desktopGitRoot,
+  projectPathEntryMode,
   readDesktopDir,
   readDesktopFileDataUrl,
   readDesktopFileDataUrlLocalFirst,
   readDesktopFileText,
   selectDesktopPaths,
-  setDesktopFsRemotePicker
+  setDesktopFsRemotePicker,
+  writeDesktopFileText
 } from './desktop-fs'
 
 const readDir = vi.fn(async () => ({ entries: [{ name: 'local', path: '/local', isDirectory: true }] }))
@@ -43,6 +47,10 @@ const api = vi.fn(async ({ path }: { path: string }) => {
     return { cwd: '/backend/project', branch: 'main' }
   }
 
+  if (path === '/api/fs/write-text') {
+    return { ok: true, path: '/remote/file.txt' }
+  }
+
   if (path.startsWith('/api/git/file-diff?')) {
     return { diff: 'remote diff' }
   }
@@ -62,6 +70,18 @@ function stubBridge() {
     }
   })
 }
+
+describe('project path entry mode', () => {
+  it.each([
+    ['local', false, 'native-picker'],
+    ['local', true, 'gateway-picker'],
+    ['non_local', false, 'text'],
+    ['unknown', true, 'text'],
+    [null, false, 'text']
+  ] as const)('maps %s scope with remote=%s to %s', (scope, remote, expected) => {
+    expect(projectPathEntryMode(scope, remote)).toBe(expected)
+  })
+})
 
 describe('desktop filesystem facade', () => {
   beforeEach(() => {
@@ -181,6 +201,76 @@ describe('desktop filesystem facade', () => {
     for (const [request] of api.mock.calls) {
       expect(request).toMatchObject({ connectionId: 'mr-small', profile: 'default' })
     }
+  })
+
+  it('keeps a file write pinned to its captured remote host after the live connection switches', async () => {
+    $connection.set({ connectionId: 'host-a', mode: 'remote', profile: 'profile-a' } as never)
+    setApiRequestConnection('host-a')
+    const route = captureDesktopFsWriteRoute()
+
+    $connection.set({ connectionId: 'host-b', mode: 'remote', profile: 'profile-b' } as never)
+    setApiRequestConnection('host-b')
+    await writeDesktopFileText('/host-a/project/IDEA.md', 'idea\n', route)
+
+    expect(api).toHaveBeenCalledWith({
+      body: { content: 'idea\n', path: '/host-a/project/IDEA.md' },
+      connectionId: 'host-a',
+      method: 'POST',
+      path: '/api/fs/write-text',
+      profile: 'profile-a'
+    })
+  })
+
+  it('keeps Project browsing pinned to its captured remote host after the live connection switches', async () => {
+    $connection.set({ connectionId: 'host-a', mode: 'remote', profile: 'profile-a' } as never)
+    setApiRequestConnection('host-a')
+    const route = captureDesktopFsWriteRoute()
+    const picker = vi.fn(async () => ['/host-a/project'])
+    setDesktopFsRemotePicker({ selectPaths: picker })
+
+    $connection.set({ connectionId: 'host-b', mode: 'remote', profile: 'profile-b' } as never)
+    setApiRequestConnection('host-b')
+
+    await readDesktopDir('/host-a/project', route)
+    await desktopDefaultCwd(route)
+    await expect(selectDesktopPaths({ directories: true }, route)).resolves.toEqual(['/host-a/project'])
+
+    expect(api).toHaveBeenCalledWith({
+      connectionId: 'host-a',
+      path: '/api/fs/list?path=%2Fhost-a%2Fproject',
+      profile: 'profile-a'
+    })
+    expect(api).toHaveBeenCalledWith({
+      connectionId: 'host-a',
+      path: '/api/fs/default-cwd',
+      profile: 'profile-a'
+    })
+    expect(picker).toHaveBeenCalledWith({ directories: true, multiple: false }, route)
+    expect(selectPaths).not.toHaveBeenCalled()
+  })
+
+  it('cancels the registered gateway picker when its project route becomes stale', () => {
+    const cancel = vi.fn()
+    setDesktopFsRemotePicker({ cancel, selectPaths: vi.fn() })
+
+    cancelDesktopFsRemotePicker()
+
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('keeps an omitted captured profile from inheriting the switched live profile', async () => {
+    $connection.set({ connectionId: 'host-a', mode: 'remote' } as never)
+    setApiRequestConnection('host-a')
+    const route = captureDesktopFsWriteRoute()
+
+    $connection.set({ connectionId: 'host-b', mode: 'remote', profile: 'profile-b' } as never)
+    setApiRequestConnection('host-b')
+    await readDesktopDir('/host-a/project', route)
+
+    expect(api).toHaveBeenCalledWith({
+      connectionId: 'host-a',
+      path: '/api/fs/list?path=%2Fhost-a%2Fproject'
+    })
   })
 
   it('separates filesystem cache keys for registered connections sharing a profile', () => {

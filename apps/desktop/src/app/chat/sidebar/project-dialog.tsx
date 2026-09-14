@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
+import { projectPathEntryMode } from '@/lib/desktop-fs'
 import { type ProjectIdeaTemplate, randomIdeaTemplates } from '@/lib/project-idea-templates'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
@@ -28,7 +29,9 @@ import {
   closeProjectDialog,
   createProject,
   generateProjectIdea,
+  openFolderAsProject,
   pickProjectFolder,
+  projectFilesystemScope,
   renameProject
 } from '@/store/projects'
 
@@ -44,10 +47,14 @@ export function ProjectDialog() {
 
   const [name, setName] = useState('')
   const [folders, setFolders] = useState<string[]>([])
+  const [folderPath, setFolderPath] = useState('')
+  const [filesystemScope, setFilesystemScope] = useState<null | 'local' | 'non_local' | 'unknown'>(null)
+  const [pathError, setPathError] = useState('')
   const [idea, setIdea] = useState('')
   const [templates, setTemplates] = useState<ProjectIdeaTemplate[]>([])
   const [generatingIdea, setGeneratingIdea] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
   const nameRef = useRef<HTMLInputElement>(null)
 
   // A "New project" DRAG arms where the project should start (tab-strip slot /
@@ -70,16 +77,52 @@ export function ProjectDialog() {
     if (open) {
       setName(state?.name ?? '')
       setFolders([])
+      setFolderPath(state?.path ?? '')
+      setFilesystemScope(mode === 'rename' ? 'unknown' : null)
+      setPathError('')
       setIdea('')
       setTemplates(randomIdeaTemplates())
       setGeneratingIdea(false)
       setSubmitting(false)
 
-      if (mode !== 'add-folder') {
+      if (mode !== 'add-folder' && mode !== 'open-folder') {
         window.setTimeout(() => nameRef.current?.select(), 0)
       }
     }
-  }, [open, mode, state?.name])
+  }, [open, mode, state?.name, state?.path])
+
+  useEffect(() => {
+    const context = state?.context
+
+    if (!open || mode === 'rename') {
+      return
+    }
+
+    let current = true
+
+    if (!context) {
+      setFilesystemScope('unknown')
+
+      return
+    }
+
+    setFilesystemScope(null)
+    void projectFilesystemScope(context)
+      .then(scope => {
+        if (current) {
+          setFilesystemScope(scope)
+        }
+      })
+      .catch(() => {
+        if (current) {
+          setFilesystemScope('unknown')
+        }
+      })
+
+    return () => {
+      current = false
+    }
+  }, [mode, open, state?.context])
 
   const onOpenChange = (next: boolean) => {
     if (!next) {
@@ -93,26 +136,30 @@ export function ProjectDialog() {
   // — the New-project drop arm is consumed there, so a failed attempt keeps
   // its placement for the retry while a successful one can't leak it forward.
   const runSubmit = async (write: () => Promise<unknown>, onSuccess?: () => void) => {
-    if (submitting) {
+    if (submittingRef.current) {
       return
     }
 
+    submittingRef.current = true
     setSubmitting(true)
+    setPathError('')
 
     try {
       await write()
       onSuccess?.()
       closeProjectDialog()
     } catch (err) {
+      setPathError(err instanceof Error ? err.message : p.pathError)
       notifyError(err, p.createFailed)
     } finally {
+      submittingRef.current = false
       setSubmitting(false)
     }
   }
 
   const pickFolder = async () => {
     try {
-      const dir = await pickProjectFolder()
+      const dir = await pickProjectFolder(state?.context)
 
       if (!dir) {
         return
@@ -121,15 +168,43 @@ export function ProjectDialog() {
       const projectId = state?.projectId
 
       if (mode === 'add-folder' && projectId) {
-        await runSubmit(() => addProjectFolder(projectId, dir))
+        await runSubmit(() => addProjectFolder(projectId, dir, { context: state?.context }))
 
         return
       }
 
       setFolders(prev => (prev.includes(dir) ? prev : [...prev, dir]))
     } catch (err) {
+      setPathError(err instanceof Error ? err.message : p.pathError)
       notifyError(err, p.createFailed)
     }
+  }
+
+  const submitFolderPath = async () => {
+    if (!folderPath.trim() || filesystemScope === null) {
+      return
+    }
+
+    const projectId = state?.projectId
+
+    if (mode === 'add-folder' && projectId) {
+      await runSubmit(() => addProjectFolder(projectId, folderPath, { context: state?.context }))
+
+      return
+    }
+
+    if (mode === 'open-folder') {
+      if (!name.trim()) {
+        return
+      }
+
+      await runSubmit(() => openFolderAsProject(folderPath, state?.context, name.trim()))
+
+      return
+    }
+
+    setFolders(prev => (prev.includes(folderPath) ? prev : [...prev, folderPath]))
+    setPathError('')
   }
 
   const submit = async () => {
@@ -138,7 +213,7 @@ export function ProjectDialog() {
 
     if (mode === 'rename' && projectId) {
       if (trimmed) {
-        await runSubmit(() => renameProject(projectId, trimmed))
+        await runSubmit(() => renameProject(projectId, trimmed, state?.context))
       }
 
       return
@@ -151,7 +226,15 @@ export function ProjectDialog() {
       // create leaves the dialog open for a retry that still lands where it
       // was dropped; the open-state effect discards it on cancel/teardown.
       await runSubmit(
-        () => createProject({ dropPlacement, folders, idea: idea.trim() || undefined, name: trimmed, use: true }),
+        () =>
+          createProject({
+            context: state?.context,
+            dropPlacement,
+            folders,
+            idea: idea.trim() || undefined,
+            name: trimmed,
+            use: true
+          }),
         clearNewProjectDropPlacement
       )
     }
@@ -175,7 +258,70 @@ export function ProjectDialog() {
     }
   }
 
-  const title = mode === 'rename' ? p.renameTitle : mode === 'add-folder' ? p.addFolderTitle : p.createTitle
+  const title =
+    mode === 'rename'
+      ? p.renameTitle
+      : mode === 'add-folder'
+        ? p.addFolderTitle
+        : mode === 'open-folder'
+          ? p.openFolderTitle
+          : p.createTitle
+
+  const pathMode = projectPathEntryMode(filesystemScope, state?.context?.remoteConnection ?? false)
+
+  const pathEntry =
+    pathMode === 'text' ? (
+      <div className="flex flex-col gap-1.5">
+        <label className="text-[0.6875rem] font-medium text-(--ui-text-tertiary)" htmlFor="project-folder-path">
+          {p.pathLabel}
+        </label>
+        <div className="flex gap-2">
+          <Input
+            aria-describedby="project-folder-path-help"
+            autoFocus={mode === 'add-folder' || mode === 'open-folder'}
+            disabled={submitting || filesystemScope === null}
+            id="project-folder-path"
+            onChange={event => {
+              setFolderPath(event.target.value)
+              setPathError('')
+            }}
+            onKeyDown={event => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                void submitFolderPath()
+              }
+            }}
+            placeholder={p.pathPlaceholder}
+            value={folderPath}
+          />
+          <Button
+            disabled={
+              submitting ||
+              filesystemScope === null ||
+              !folderPath.trim() ||
+              (mode === 'open-folder' && !name.trim())
+            }
+            onClick={() => void submitFolderPath()}
+            type="button"
+          >
+            {p.pathAdd}
+          </Button>
+        </div>
+        <span className="text-[0.6875rem] text-(--ui-text-quaternary)" id="project-folder-path-help">
+          {filesystemScope === null ? p.pathLoading : p.pathHelp}
+        </span>
+        {pathError && (
+          <span className="text-[0.75rem] text-destructive" role="alert">
+            {pathError}
+          </span>
+        )}
+      </div>
+    ) : (
+      <Button disabled={submitting || filesystemScope === null} onClick={() => void pickFolder()} type="button">
+        <Codicon name="folder-opened" size="0.875rem" />
+        {p.addFolder}
+      </Button>
+    )
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -185,7 +331,7 @@ export function ProjectDialog() {
           {mode === 'create' && <DialogDescription>{p.createDesc}</DialogDescription>}
         </DialogHeader>
 
-        {mode !== 'add-folder' && (
+        {mode !== 'add-folder' && (mode !== 'open-folder' || pathMode === 'text') && (
           <Input
             autoFocus
             disabled={submitting}
@@ -243,17 +389,21 @@ export function ProjectDialog() {
                 ))}
               </ul>
             )}
-            <Button
-              className="self-start"
-              disabled={submitting}
-              onClick={() => void pickFolder()}
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              <Codicon name="add" size="0.75rem" />
-              {p.addFolder}
-            </Button>
+            {pathMode === 'text' ? (
+              pathEntry
+            ) : (
+              <Button
+                className="self-start"
+                disabled={submitting || filesystemScope === null}
+                onClick={() => void pickFolder()}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                <Codicon name="add" size="0.75rem" />
+                {p.addFolder}
+              </Button>
+            )}
           </div>
         )}
 
@@ -307,14 +457,15 @@ export function ProjectDialog() {
           </div>
         )}
 
-        {mode === 'add-folder' && (
-          <Button disabled={submitting} onClick={() => void pickFolder()} type="button">
-            <Codicon name="folder-opened" size="0.875rem" />
-            {p.addFolder}
-          </Button>
+        {(mode === 'add-folder' || mode === 'open-folder') && pathEntry}
+
+        {pathMode !== 'text' && pathError && (
+          <span className="text-[0.75rem] text-destructive" role="alert">
+            {pathError}
+          </span>
         )}
 
-        {mode !== 'add-folder' && (
+        {mode !== 'add-folder' && mode !== 'open-folder' && (
           <DialogFooter>
             <Button disabled={submitting} onClick={() => onOpenChange(false)} type="button" variant="ghost">
               {t.common.cancel}

@@ -55,6 +55,27 @@ describe('useCwdActions draft workspace target', () => {
     vi.restoreAllMocks()
   })
 
+  it('preserves canonical whitespace and backslash bytes when changing a draft workspace', async () => {
+    const requestGateway = vi.fn(async () => ({ branch: 'main' }) as never)
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
+    let handle: CwdActionsHandle | null = null
+
+    render(
+      <Harness activeSessionIdRef={activeSessionIdRef} onReady={h => (handle = h)} requestGateway={requestGateway} />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    const cwd = ' C:\\canonical repo\\ '
+
+    await act(async () => {
+      await handle!.changeSessionCwd(cwd)
+    })
+
+    expect(requestGateway).toHaveBeenCalledWith('config.get', { key: 'project', cwd })
+    expect($currentCwd.get()).toBe(cwd)
+    expect($newChatWorkspaceTarget.get()).toBe(cwd)
+  })
+
   it('ignores stale draft cwd normalization after a newer no-workspace target wins', async () => {
     const projectInfo = deferred<{ branch?: string; cwd?: string }>()
     const requestGateway = vi.fn(async () => projectInfo.promise as never)

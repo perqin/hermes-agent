@@ -16,6 +16,14 @@ from agent.lazy_forward import forward as _forward
 logger = logging.getLogger("run_agent")
 
 
+def _effective_task_id(task_id: Optional[str]) -> str:
+    if task_id:
+        return task_id
+    from agent.turn_context import _default_turn_task_id
+
+    return _default_turn_task_id()
+
+
 class TurnFacadeMixin:
     """run_conversation()/chat() (see module docstring)."""
 
@@ -52,7 +60,7 @@ class TurnFacadeMixin:
         from agent.turn_facade_lease import admit_durable_turn_lease
         from hermes_cli.observability.relay_shared_metrics import finish_task_run, start_task_run
 
-        effective_task_id = task_id or str(uuid.uuid4())
+        effective_task_id = _effective_task_id(task_id)
         session_id = str(getattr(self, "session_id", None) or "")
         task_context = {
             "session_id": session_id,

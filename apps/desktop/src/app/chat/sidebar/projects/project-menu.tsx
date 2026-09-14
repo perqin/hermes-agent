@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import {
   type ActionItemSpec,
@@ -20,13 +20,17 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { useI18n } from '@/i18n'
+import { onProjectFilesystemCapabilityInvalidated } from '@/lib/project-filesystem-capability'
 import { cn } from '@/lib/utils'
+import { $gatewayActivationGeneration } from '@/store/gateway'
 import { $panesFlipped, dismissAutoProject } from '@/store/layout'
 import {
+  captureProjectPathContext,
   copyPath,
   deleteProject,
   openProjectAddFolder,
   openProjectRename,
+  type ProjectPathContext,
   revealPath,
   setActiveProject,
   setProjectAppearance
@@ -55,7 +59,9 @@ function useProjectActions({
   const { t } = useI18n()
   const p = t.sidebar.projects
   const target = { id: project.id, name: project.label }
-  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
+  const [deleteContext, setDeleteContext] = useState<ProjectPathContext | null>(null)
+  useEffect(() => $gatewayActivationGeneration.listen(() => setDeleteContext(null)), [])
+  useEffect(() => onProjectFilesystemCapabilityInvalidated(() => setDeleteContext(null)), [])
 
   const removeAuto = () => {
     dismissAutoProject(project.id)
@@ -66,7 +72,11 @@ function useProjectActions({
   }
 
   const confirmDelete = async () => {
-    await deleteProject(project.id)
+    if (!deleteContext) {
+      return
+    }
+
+    await deleteProject(project.id, deleteContext)
 
     if (scoped) {
       onExitScope?.()
@@ -118,7 +128,7 @@ function useProjectActions({
         icon: 'trash',
         key: 'delete',
         label: `${p.menuDelete}…`,
-        onSelect: () => setConfirmDeleteOpen(true),
+        onSelect: () => setDeleteContext(captureProjectPathContext()),
         variant: 'destructive'
       }
 
@@ -127,9 +137,9 @@ function useProjectActions({
       confirmLabel={p.menuDelete}
       description={p.deleteConfirm}
       destructive
-      onClose={() => setConfirmDeleteOpen(false)}
+      onClose={() => setDeleteContext(null)}
       onConfirm={confirmDelete}
-      open={confirmDeleteOpen}
+      open={Boolean(deleteContext)}
       title={`${p.menuDelete} "${project.label}"?`}
     />
   )

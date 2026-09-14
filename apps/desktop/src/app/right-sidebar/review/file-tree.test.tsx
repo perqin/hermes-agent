@@ -1,10 +1,13 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesReviewFile } from '@/global'
 import { I18nProvider } from '@/i18n'
+import { setProjectFilesystemScope } from '@/lib/project-filesystem-capability'
 import { $sidebarWorkspaceNodeOpen } from '@/store/layout'
-import { $reviewFiles, $reviewOpen } from '@/store/review'
+import { $notifications, clearNotifications } from '@/store/notifications'
+import { $reviewFiles, $reviewOpen, $reviewScopeTarget } from '@/store/review'
+import { $currentCwd } from '@/store/session'
 
 import { ReviewFileTree } from './file-tree'
 
@@ -126,5 +129,30 @@ describe('ReviewFileTree', () => {
     expect(screen.getByText('b.ts')).toBeTruthy()
     expect(screen.getByText('src')).toBeTruthy()
     expect(screen.getByText('c.ts')).toBeTruthy()
+  })
+
+  it.each([false, true])('reports current row mutation errors (staged=%s)', async staged => {
+    setProjectFilesystemScope('local')
+    $currentCwd.set('/repo')
+    $reviewScopeTarget.set('main')
+    clearNotifications()
+    let fail!: (error: Error) => void
+
+    const mutation = vi.fn(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject
+        })
+    )
+
+    window.hermesDesktop = { git: { review: { stage: mutation, unstage: mutation } } } as unknown as NonNullable<
+      Window['hermesDesktop']
+    >
+    $reviewFiles.set([{ ...file('a.ts'), staged }])
+    renderTree()
+    fireEvent.click(screen.getByRole('button', { name: staged ? 'Unstage' : 'Stage' }))
+    await act(async () => fail(new Error('row mutation failed')))
+    expect($notifications.get().map(n => n.message)).toEqual(['row mutation failed'])
+    setProjectFilesystemScope('unknown')
   })
 })

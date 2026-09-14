@@ -42,6 +42,7 @@ describe('baseName', () => {
 describe('kanbanWorktreeDir', () => {
   it('matches a kanban task worktree (t_<hex>) and returns its .worktrees dir', () => {
     expect(kanbanWorktreeDir('/repo/.worktrees/t_aaaaaaaa')).toBe('/repo/.worktrees')
+    expect(kanbanWorktreeDir('/repo/.worktrees/t_aaaaaaaa/src/nested')).toBe('/repo/.worktrees')
   })
 
   it('does NOT match a user-named "New worktree" under .worktrees/ (its own lane)', () => {
@@ -482,6 +483,16 @@ describe('liveSessionProjectId', () => {
     ])
 
     expect(id).toBe('p_app')
+  })
+
+  it('treats POSIX Project suffixes as literal path characters', () => {
+    const backslashProjects = [makeProject('p_literal', ['/srv/project\\'])]
+    const spacedProjects = [makeProject('p_spaced', ['/srv/project '])]
+
+    expect(liveSessionProjectId(makeCwdSession('/srv/project\\/src'), backslashProjects)).toBe('p_literal')
+    expect(liveSessionProjectId(makeCwdSession('/srv/project/src'), backslashProjects)).not.toBe('p_literal')
+    expect(liveSessionProjectId(makeCwdSession('/srv/project '), spacedProjects)).toBe('p_spaced')
+    expect(liveSessionProjectId(makeCwdSession('/srv/project/src'), spacedProjects)).not.toBe('p_spaced')
   })
 
   it('anchors a cwd-less session on its git_repo_root (backend groups it there too)', () => {

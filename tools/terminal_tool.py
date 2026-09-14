@@ -291,10 +291,16 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         # or the collapsed container id (isolation-keyed rollouts); try both so
         # a CWD-only override (which collapses to "default") still finds it.
         container_id = _resolve_container_task_id(task_id)
-        with _env_lock:
-            env = _active_environments.get(task_id) or _active_environments.get(container_id)
-        if env is not None and getattr(env, "cwd", None) is not None:
-            env.cwd = new_cwd
+        # A collapsed environment (for example persistent Docker or CLI
+        # ``default``) is shared by several task/session ids.  Mutating its
+        # compatibility ``cwd`` attribute would leak this task's workspace into
+        # the next task.  Raw-keyed environments are private and retain the
+        # historical immediate update behaviour.
+        if container_id == task_id:
+            with _env_lock:
+                env = _active_environments.get(task_id)
+            if env is not None and getattr(env, "cwd", None) is not None:
+                env.cwd = new_cwd
 
 
 def clear_task_env_overrides(task_id: str):
@@ -1045,6 +1051,44 @@ def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
             _last_activity[eff] = time.time()
         logger.info("%s environment ready for task %s", env_type, eff[:8])
         return new_env
+
+
+class TerminalEnvironmentAcquisitionError(RuntimeError):
+    """A configured terminal environment could not be acquired."""
+
+
+def acquire_terminal_environment(
+    *, task_id: Optional[str] = None, operation_scope: Optional[str] = None,
+    timeout: int = 30,
+) -> Any:
+    """Return the configured/cached terminal environment without running a tool command.
+
+    A real ``task_id`` reuses that session's lifecycle.  Sessionless callers may
+    supply ``operation_scope`` to keep profile-qualified remote environments in
+    distinct cache slots.  Acquisition failures are raised rather than folded
+    into the model-facing terminal result envelope.
+    """
+    planning_task_id = task_id if task_id is not None else operation_scope
+    try:
+        plan = _plan_execution(
+            ":", task_id=planning_task_id, timeout=timeout,
+            background=False, _host_local=False,
+        )
+        if task_id is None and operation_scope:
+            plan.effective_task_id = operation_scope
+        return _acquire_env(plan, task_id)
+    except _Rejected as exc:
+        try:
+            message = json.loads(exc.result_json).get("error") or "terminal environment was rejected"
+        except Exception:
+            message = "terminal environment was rejected"
+        raise TerminalEnvironmentAcquisitionError(_redact_terminal_error_text(str(message))) from None
+    except TerminalEnvironmentAcquisitionError:
+        raise
+    except Exception as exc:
+        message = _redact_terminal_error_text(
+            f"terminal environment acquisition failed: {type(exc).__name__}: {exc}")
+        raise TerminalEnvironmentAcquisitionError(message) from None
 
 
 def _yield_kwargs(command: str, **ctx) -> dict:

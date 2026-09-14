@@ -49,7 +49,7 @@ export function startWorkspaceSession({
 
   // A worktree lane carries its own path. Empty string (legacy/path-less trunk)
   // can fall back to the active project's root, but null was handled above.
-  const explicitTarget = path.trim()
+  const explicitTarget = path.trim() ? path : ''
   const target = explicitTarget || resolveNewSessionCwd()
 
   startFreshSessionDraft(target ? { workspaceTarget: target } : undefined)

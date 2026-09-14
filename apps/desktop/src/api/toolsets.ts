@@ -1,3 +1,4 @@
+import { projectFilesystemConfigWritten } from '@/lib/project-filesystem-capability'
 import type {
   ActionResponse,
   ComputerUseStatus,
@@ -116,13 +117,19 @@ export function getTerminalBackends(): Promise<TerminalBackendsResponse> {
   })
 }
 
-export function selectTerminalBackend(backend: string): Promise<{ ok: boolean; backend: string }> {
-  return hermesApi<{ ok: boolean; backend: string }>({
+export async function selectTerminalBackend(backend: string): Promise<{ ok: boolean; backend: string }> {
+  const result = await hermesApi<{ ok: boolean; backend: string }>({
     ...profileScoped(),
     path: '/api/tools/terminal/backend',
     method: 'PUT',
     body: { backend }
   })
+
+  if (result.ok) {
+    projectFilesystemConfigWritten()
+  }
+
+  return result
 }
 
 export function getComputerUseStatus(): Promise<ComputerUseStatus> {

@@ -23,7 +23,7 @@ export function useCwdActions({ activeSessionIdRef, onSessionRuntimeInfo, reques
 
   const refreshProjectBranch = useCallback(
     async (cwd: string) => {
-      const target = cwd.trim()
+      const target = cwd.trim() ? cwd : ''
 
       if (!target || activeSessionIdRef.current) {
         return
@@ -47,9 +47,9 @@ export function useCwdActions({ activeSessionIdRef, onSessionRuntimeInfo, reques
 
   const changeSessionCwd = useCallback(
     async (cwd: string) => {
-      const trimmed = cwd.trim()
+      const target = cwd.trim() ? cwd : ''
 
-      if (!trimmed) {
+      if (!target) {
         return
       }
 
@@ -60,13 +60,13 @@ export function useCwdActions({ activeSessionIdRef, onSessionRuntimeInfo, reques
       const sessionId = activeSessionIdRef.current
 
       if (!sessionId) {
-        setCurrentCwd(trimmed)
-        const workspaceGeneration = setNewChatWorkspaceTarget(trimmed)
+        setCurrentCwd(target)
+        const workspaceGeneration = setNewChatWorkspaceTarget(target)
 
         try {
           const info = await requestGateway<{ branch?: string; cwd?: string }>('config.get', {
             key: 'project',
-            cwd: trimmed
+            cwd: target
           })
 
           if ($newChatWorkspaceTargetGeneration.get() !== workspaceGeneration || activeSessionIdRef.current) {
@@ -93,12 +93,12 @@ export function useCwdActions({ activeSessionIdRef, onSessionRuntimeInfo, reques
       try {
         const info = await requestGateway<SessionRuntimeInfo>('session.cwd.set', {
           session_id: sessionId,
-          cwd: trimmed
+          cwd: target
         })
 
-        setCurrentCwd(info.cwd || trimmed)
+        setCurrentCwd(info.cwd || target)
         setCurrentBranch(info.branch || '')
-        onSessionRuntimeInfo?.({ branch: info.branch || '', cwd: info.cwd || trimmed })
+        onSessionRuntimeInfo?.({ branch: info.branch || '', cwd: info.cwd || target })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
 
@@ -108,7 +108,7 @@ export function useCwdActions({ activeSessionIdRef, onSessionRuntimeInfo, reques
           return
         }
 
-        setCurrentCwd(trimmed)
+        setCurrentCwd(target)
         setCurrentBranch('')
         notify({
           kind: 'warning',

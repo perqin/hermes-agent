@@ -772,6 +772,12 @@ export const it: Translations = {
     workspacePathDir: "percorso del workspace (richiesto, ad es. ~/projects/my-app)",
     workspacePathOptional:
       "percorso del workspace (facoltativo, derivato dall'assegnatario se vuoto)",
+    projectDirectoryExplanation:
+      "Il percorso assoluto viene risolto al salvataggio nell’ambiente terminale del profilo della richiesta.",
+    projectDirectoryPending: "Convalida della directory del progetto nell’ambiente terminale…",
+    projectDirectoryValidationError: "Convalida della directory del progetto non riuscita: {error}",
+    projectDirectoryOverrideHint: "Le nuove attività la ereditano come area di lavoro predefinita; ogni attività può sostituirla nella finestra di creazione.",
+    saving: "Salvataggio…",
     logTruncated: "(mostrando ultimi 100 KB — log completo in ",
     logAt: ")",
   },

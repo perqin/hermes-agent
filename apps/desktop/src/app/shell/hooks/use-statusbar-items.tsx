@@ -163,7 +163,7 @@ export function useStatusbarItems({
   // reports new usage — far rarer than a delta — so its reference is a valid
   // bail-out key on its own.
   const focusedUsage = useStoreSelector($focusedSessionState, state => state?.usage ?? null)
-  const focusedStateCwd = useStoreSelector($focusedSessionState, state => state?.cwd?.trim() || '')
+  const focusedStateCwd = useStoreSelector($focusedSessionState, state => (state?.cwd?.trim() ? state.cwd : ''))
 
   // Runtime slices carry the stored id they were bound for. During a primary
   // tab switch the runtime id can lag a frame behind the new selection — the
@@ -200,7 +200,7 @@ export function useStatusbarItems({
 
     const row = sessions.find(s => sessionMatchesStoredId(s, focusedStoredSessionId))
 
-    return row?.cwd?.trim() || ''
+    return row?.cwd?.trim() ? row.cwd : ''
   })
 
   // Live runtime cwd is authoritative once it belongs to the focused chat

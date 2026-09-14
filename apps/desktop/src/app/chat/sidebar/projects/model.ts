@@ -21,8 +21,7 @@ const WORKTREE_PROBE_CONCURRENCY = 4
 
 const pathListKey = (paths: string[]): string =>
   paths
-    .map(path => path.trim())
-    .filter(Boolean)
+    .filter(path => Boolean(path.trim()))
     .sort((a, b) => a.localeCompare(b))
     .join('\n')
 

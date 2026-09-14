@@ -774,6 +774,12 @@ export const pt: Translations = {
     workspacePathDir: "caminho do espaço de trabalho (obrigatório, p. ex. ~/projects/my-app)",
     workspacePathOptional:
       "caminho do espaço de trabalho (opcional, derivado do responsável se vazio)",
+    projectDirectoryExplanation:
+      "O caminho absoluto é resolvido ao guardar no ambiente de terminal do perfil deste pedido.",
+    projectDirectoryPending: "A validar o diretório do projeto no ambiente de terminal…",
+    projectDirectoryValidationError: "Falha ao validar o diretório do projeto: {error}",
+    projectDirectoryOverrideHint: "As novas tarefas herdam-no como espaço de trabalho predefinido; cada tarefa pode substituí-lo no diálogo de criação.",
+    saving: "A guardar…",
     logTruncated: "(a mostrar os últimos 100 KB — registo completo em ",
     logAt: ")",
   },

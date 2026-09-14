@@ -768,6 +768,12 @@ export const zh: Translations = {
     workspacePathDir: "工作区路径（必填，例如 ~/projects/my-app）",
     workspacePathOptional:
       "工作区路径（可选，留空则根据负责人推导）",
+    projectDirectoryExplanation:
+      "保存时，绝对路径会在此请求配置文件的终端环境中解析。",
+    projectDirectoryPending: "正在终端环境中验证项目目录…",
+    projectDirectoryValidationError: "项目目录验证失败：{error}",
+    projectDirectoryOverrideHint: "新任务会继承该目录作为默认工作区；每个任务仍可在创建对话框中覆盖它。",
+    saving: "正在保存…",
     logTruncated: "（显示最后 100 KB — 完整日志位于 ",
     logAt: "）",
   },

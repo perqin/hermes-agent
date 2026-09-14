@@ -10,13 +10,16 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { translateNow, useI18n } from '@/i18n'
-import { isDesktopFsRemoteMode } from '@/lib/desktop-fs'
 import { IS_MAC } from '@/lib/keybinds/combo'
+import { $projectFilesystemScope } from '@/lib/project-filesystem-capability'
 import { cn } from '@/lib/utils'
 import {
   $fileActionDialog,
+  $inlineRenameGeneration,
   beginInlineRename,
   cancelInlineRename,
+  captureFileActionContext,
+  captureInlineRenameOwner,
   closeFileActionDialog,
   copyFilePath,
   downloadRemoteFile,
@@ -61,7 +64,7 @@ export function FileEntryContextMenu({ children, isDirectory, name, path, relati
   // Reveal / rename / delete need the local filesystem; hide them on a remote
   // backend (copy-path still works everywhere). Download uses the existing
   // gateway save bridge so a remote file can land on this machine.
-  const localFs = !isDesktopFsRemoteMode()
+  const localFs = useStore($projectFilesystemScope) === 'local'
   const remoteDownload = shouldOfferRemoteFileDownload(isDirectory)
   const target: FileActionTarget = { isDirectory, name, path }
   const revealLabel = pickRevealLabel(m.revealFinder, m.revealExplorer, m.revealFileManager)
@@ -116,10 +119,12 @@ export function FileActionDialogs() {
       confirmLabel={t.fileMenu.delete}
       description={t.fileMenu.deleteBody}
       destructive
+      isCurrent={() => $fileActionDialog.get() === dialog}
+      key={dialog?.id ?? 'closed'}
       onClose={closeFileActionDialog}
       onConfirm={() => {
         if (deleting) {
-          return executeFileDelete(dialog.path)
+          return executeFileDelete(dialog.path, dialog.context)
         }
       }}
       open={deleting}
@@ -139,7 +144,15 @@ interface InlineRenameInputProps {
 /** The in-row rename editor (VS Code style): seeded with the name (stem
  *  pre-selected), commits on Enter/blur, cancels on Esc. Render it in place of a
  *  row's label when `$renamingPath === path`. */
-export function InlineRenameInput({ className, name, path }: InlineRenameInputProps) {
+export function InlineRenameInput(props: InlineRenameInputProps) {
+  const generation = useStore($inlineRenameGeneration)
+
+  return <InlineRenameEditor key={generation} {...props} />
+}
+
+function InlineRenameEditor({ className, name, path }: InlineRenameInputProps) {
+  const [context] = useState(captureFileActionContext)
+  const [isCurrent] = useState(captureInlineRenameOwner)
   const [value, setValue] = useState(name)
   // Enter then the resulting blur must not both commit; latch on first finish.
   const done = useRef(false)
@@ -149,7 +162,7 @@ export function InlineRenameInput({ className, name, path }: InlineRenameInputPr
   const mountedAt = useRef(Date.now())
 
   const finish = async (commit: boolean) => {
-    if (done.current) {
+    if (done.current || !isCurrent()) {
       return
     }
 
@@ -158,13 +171,17 @@ export function InlineRenameInput({ className, name, path }: InlineRenameInputPr
 
     if (commit && next && next !== name) {
       try {
-        await executeFileRename(path, next)
+        await executeFileRename(path, next, context)
       } catch (error) {
-        notifyError(error, translateNow('errors.genericFailure'))
+        if (isCurrent()) {
+          notifyError(error, translateNow('errors.genericFailure'))
+        }
       }
     }
 
-    cancelInlineRename()
+    if (isCurrent()) {
+      cancelInlineRename()
+    }
   }
 
   return (

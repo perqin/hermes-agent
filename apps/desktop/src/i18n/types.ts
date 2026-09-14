@@ -2208,6 +2208,13 @@ export interface Translations {
       createDesc: string
       renameTitle: string
       addFolderTitle: string
+      openFolderTitle: string
+      pathLabel: string
+      pathPlaceholder: string
+      pathHelp: string
+      pathLoading: string
+      pathAdd: string
+      pathError: string
       namePlaceholder: string
       foldersLabel: string
       ideaLabel: string

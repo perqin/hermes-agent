@@ -110,6 +110,39 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return _managed_scratch_path_info(p)[0]
 
 
+def _backend_worktree_binding(conn: sqlite3.Connection, task_id: str, path: str):
+    """Return ``(task, provenance)`` for a backend-owned worktree."""
+    try:
+        task = _kb.get_task(conn, task_id)
+    except Exception:
+        return None
+    if task is None:
+        return None
+    from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+    root = nonblank_backend_path(getattr(task, "workspace_root", None))
+    if getattr(task, "workspace_requires_preflight", False) and root:
+        return task, {
+            "project_id": getattr(task, "project_id", None),
+            "project_slug": getattr(task, "workspace_project_slug", None),
+            "source_profile": getattr(task, "workspace_source_profile", None),
+            "default_workdir": root,
+            "default_workspace_kind": getattr(task, "workspace_kind", None),
+            "filesystem_local": getattr(task, "workspace_filesystem_local", None),
+        }
+    if getattr(task, "project_id", None):
+        from hermes_cli.kanban_project_paths import worktree_root_for_task
+
+        historical_root = worktree_root_for_task(path, task_id)
+        if historical_root:
+            return task, {
+                "project_id": task.project_id,
+                "default_workdir": historical_root,
+                "filesystem_local": None,
+            }
+    return None
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
     Called from :func:`complete_task` after the transaction commits; best-effort
@@ -141,6 +174,46 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         # lingering worker never has its cwd deleted from under it.
         if kind == "worktree":
             _cleanup_worker_tmux(conn, task_id)
+            backend_binding = _backend_worktree_binding(conn, task_id, path)
+            if backend_binding is not None:
+                task, meta = backend_binding
+                try:
+                    from agent.delegation_context import is_dispatcher_owned_worker_context
+
+                    owns_task = (
+                        os.environ.get("HERMES_KANBAN_TASK") == task_id
+                        and is_dispatcher_owned_worker_context()
+                    )
+                except Exception:
+                    owns_task = False
+                if not owns_task and meta.get("filesystem_local") is not True:
+                    _kb._log.info(
+                        "Preserving backend worktree for task %s: cleanup is not running in its worker",
+                        task_id,
+                    )
+                    return
+                if owns_task:
+                    try:
+                        from hermes_cli.kanban_worker_workspace import cleanup_project_worktree
+                        from tools.terminal_tool import acquire_terminal_environment
+
+                        env = acquire_terminal_environment(task_id=task_id)
+                        if getattr(env, "is_local", False) is not True:
+                            cleanup_project_worktree(
+                                task,
+                                meta,
+                                env,
+                                profile=str(getattr(task, "assignee", None) or "default"),
+                            )
+                            _try_cleanup_parent_workspaces(conn, task_id)
+                            return
+                    except Exception:
+                        _kb._log.debug(
+                            "Backend worktree cleanup failed for task %s; preserving it",
+                            task_id,
+                            exc_info=True,
+                        )
+                        return
             _cleanup_worktree_workspace(task_id, path, row["branch_name"])
             _try_cleanup_parent_workspaces(conn, task_id)
             return
@@ -238,7 +311,7 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             ):
                 continue
             if row["workspace_kind"] == "worktree":
-                _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"])
+                _cleanup_workspace(conn, parent_id)
                 continue
             wp = Path(row["workspace_path"])
             if wp.is_dir() and _is_managed_scratch_path(wp):
@@ -427,7 +500,11 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
     if not task.workspace_path:
         board_slug = board if board else _kb.get_current_board()
-        board_default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
+        from hermes_cli.kanban_project_paths import nonblank_backend_path
+
+        board_default = nonblank_backend_path(
+            _kb.read_board_metadata(board_slug).get("default_workdir")
+        )
         if not board_default:
             raise ValueError(
                 f"task {task.id} has workspace_kind=worktree but no workspace_path, "

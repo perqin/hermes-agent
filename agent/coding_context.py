@@ -195,9 +195,9 @@ def _coding_mode(config: Optional[dict[str, Any]]) -> str:
     return _MODE_ALIASES.get(str(raw).strip().lower(), "auto")
 
 
-def _resolve_cwd(cwd: Optional[str | Path]) -> Path:
+def _resolve_cwd(cwd: Optional[str | Path], *, filesystem_local: bool = True) -> Path:
     if cwd:
-        return Path(cwd).expanduser()
+        return Path(cwd).expanduser() if filesystem_local else Path(str(cwd))
     try:
         from agent.runtime_cwd import resolve_agent_cwd
         return resolve_agent_cwd()
@@ -307,6 +307,7 @@ class RuntimeMode:
     config_mode: str = "auto"
     model: Optional[str] = None
     instructions: str = ""
+    filesystem_local: bool = True
 
     @property
     def kind(self) -> str:
@@ -343,7 +344,10 @@ class RuntimeMode:
             if family is not None:
                 brief = f"{brief}\n{_EDIT_FORMAT_GUIDANCE[family][1]}"
             prefix.append(brief)
-        workspace = build_coding_workspace_block(self.cwd) if workspace_block is None else workspace_block
+        workspace = "" if not self.filesystem_local else (
+            build_coding_workspace_block(self.cwd)
+            if workspace_block is None else workspace_block
+        )
         trailing = [f"Operator instructions (from config):\n{self.instructions}"] if self.instructions else []
         return prefix, [workspace] if workspace else [], trailing
 
@@ -369,18 +373,25 @@ def resolve_runtime_mode(
     point every domain should call; the result is safe to hold for the session. ``model``
     only steers edit-format guidance; ``agent.coding_instructions`` (str or list) becomes
     the trailing block so a user can pin workflow rules without editing the shipped brief."""
-    resolved_cwd = _resolve_cwd(cwd)
+    from agent.runtime_cwd import filesystem_is_local as runtime_filesystem_is_local
+
+    filesystem_local = runtime_filesystem_is_local()
+    resolved_cwd = _resolve_cwd(cwd, filesystem_local=filesystem_local)
     mode = _coding_mode(config)
     raw = _agent_config_value(config, "coding_instructions", "", readonly=False)
     items = raw if isinstance(raw, (list, tuple)) else [raw or ""]
     instructions = "\n".join(str(item).strip() for item in items if str(item).strip())
     return RuntimeMode(
-        profile=_detect_profile(mode, (platform or "").strip().lower(), resolved_cwd),
+        profile=(
+            _detect_profile(mode, (platform or "").strip().lower(), resolved_cwd)
+            if filesystem_local or mode == "on" else GENERAL_PROFILE
+        ),
         surface=platform or "",
         cwd=resolved_cwd,
         config_mode=mode,
         model=model,
         instructions=instructions,
+        filesystem_local=filesystem_local,
     )
 
 

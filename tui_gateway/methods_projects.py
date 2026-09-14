@@ -3,6 +3,8 @@ Bodies are rebound onto server.py's globals at install (method_ctx.bind_module).
 
 from __future__ import annotations
 
+import contextlib
+
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -15,6 +17,30 @@ _E_PROJECTS, _E_NO_PROJECT, _E_PROJECT_ARG = 5061, 5062, 5063
 
 class _NoProject(Exception):
     """Raised inside a projects handler when ``params['id']`` resolves to None."""
+
+
+@contextlib.contextmanager
+def _project_runtime_scope():
+    """Bind secrets and complete terminal policy for the already home-scoped request."""
+    home = Path(get_hermes_home())
+    secret_token = set_secret_scope(build_profile_secret_scope(home))
+    from tools.terminal_scope import install_profile_terminal_scope, reset_terminal_scope
+
+    terminal_token = install_profile_terminal_scope(home)
+    try:
+        yield f"projects:{home}"
+    finally:
+        reset_terminal_scope(terminal_token)
+        reset_secret_scope(secret_token)
+
+
+def _project_filesystem_is_local() -> bool:
+    """Current requested profile's lightweight terminal-filesystem capability."""
+    with _project_runtime_scope():
+        from tools.terminal_tool import _get_env_config
+        from tools.terminal_tool_backends import terminal_filesystem_scope
+
+        return terminal_filesystem_scope(_get_env_config().get("env_type", "")) == "local"
 
 
 def _projects_payload(conn) -> dict:
@@ -63,8 +89,22 @@ def _register_project_mutator(suffix: str, fn_name: str, takes_path: bool, kwarg
     @_projects_method(f"projects.{suffix}")
     def _(rid, params, pdb, conn) -> dict:
         proj = _require_project(pdb, conn, params)
-        args = (str(params.get("path") or ""),) if takes_path else ()
-        getattr(pdb, fn_name)(conn, proj.id, *args, **kwargs_of(params))
+        args = ()
+        kwargs = kwargs_of(params)
+        if takes_path:
+            from hermes_cli.project_paths import (
+                resolve_project_folder, resolve_project_folder_reference,
+            )
+            with _project_runtime_scope() as operation_scope:
+                raw = str(params.get("path") or "")
+                canonical = (
+                    resolve_project_folder(raw, operation_scope=operation_scope)
+                    if fn_name == "add_folder" else
+                    resolve_project_folder_reference(
+                        proj, raw, operation_scope=operation_scope))
+            args = (canonical,)
+            kwargs["canonical_paths"] = True
+        getattr(pdb, fn_name)(conn, proj.id, *args, **kwargs)
         return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
 
 
@@ -90,13 +130,34 @@ def _(rid, params, pdb, conn) -> dict:
 
 @_projects_method("projects.create")
 def _(rid, params, pdb, conn) -> dict:
+    from hermes_cli.project_paths import resolve_project_folders
+
+    with _project_runtime_scope() as operation_scope:
+        folders, primary = resolve_project_folders(
+            params.get("folders") or [], params.get("primary_path"),
+            operation_scope=operation_scope)
     pid = pdb.create_project(
-        conn, name=str(params.get("name") or ""), folders=params.get("folders") or [],
-        **_pick(params, "slug", "primary_path", "description", "icon", "color", "board_slug"))
+        conn, name=str(params.get("name") or ""), folders=folders, primary_path=primary,
+        canonical_paths=True,
+        **_pick(params, "slug", "description", "icon", "color", "board_slug"))
     if params.get("use"):
         pdb.set_active(conn, pid)
     proj = pdb.get_project(conn, pid)
     return _ok(rid, {"project": proj.to_dict() if proj else None})
+
+
+@method("projects.capabilities")
+@_registry.profile_scoped
+def _(rid, params: dict) -> dict:
+    try:
+        with _project_runtime_scope():
+            from tools.terminal_tool import _get_env_config
+            from tools.terminal_tool_backends import terminal_filesystem_scope
+
+            scope = terminal_filesystem_scope(_get_env_config().get("env_type", ""))
+        return _ok(rid, {"filesystem_scope": scope})
+    except Exception:
+        return _ok(rid, {"filesystem_scope": "unknown"})
 
 
 @_projects_method("projects.archive")
@@ -120,12 +181,27 @@ def _(rid, params, pdb, conn) -> dict:
 
 @_projects_method("projects.for_cwd")
 def _(rid, params, pdb, conn) -> dict:
-    cwd = _completion_cwd(
-        {"cwd": str(params.get("cwd") or "").strip()} if params.get("cwd") else {})
+    from hermes_cli.project_paths import resolve_project_folder
+    from tools.terminal_tool import acquire_terminal_environment
+
+    with _project_runtime_scope() as operation_scope:
+        raw = str(params.get("cwd") or "")
+        if not raw.strip():
+            return _ok(rid, {"project": None, "branch": "", "cwd": ""})
+        try:
+            env = acquire_terminal_environment(operation_scope=operation_scope)
+        except Exception:
+            raise ValueError(
+                f"could not resolve project folder {raw!r} in the terminal environment") from None
+        if not raw:
+            raw = _completion_cwd({}) if getattr(env, "is_local", False) is True else "."
+        cwd = resolve_project_folder(
+            raw, operation_scope=operation_scope, environment=env)
     proj = pdb.project_for_path(conn, cwd)
+    branch = git_probe.branch(cwd) if getattr(env, "is_local", False) is True else ""
     return _ok(rid, {
         "project": proj.to_dict() if proj else None, "cwd": cwd,
-        "branch": git_probe.branch(cwd)})
+        "branch": branch})
 
 
 def _non_workspace_dirs() -> set[str]:
@@ -160,6 +236,19 @@ def _is_session_cwd_junk(cwd: str) -> bool:
     real = os.path.normcase(os.path.realpath(cwd))
     hermes_home = os.path.normcase(os.path.realpath(str(get_hermes_home())))
     return real in _non_workspace_dirs() or real == hermes_home
+
+
+def _is_backend_cwd_junk(cwd: str) -> bool:
+    """Conservative junk detection without interpreting a backend path on this host."""
+    from hermes_cli.project_paths import canonical_path_key, path_segments
+
+    if not cwd:
+        return True
+    style, key = canonical_path_key(cwd)
+    if style == "posix":
+        return key in {".", "/", "/home", "/Users"}
+    segments = path_segments(cwd)
+    return len(segments) == 1 and segments[0].endswith(":")
 
 
 def _repo_discovery_policy(raw: dict | None = None) -> dict:
@@ -331,31 +420,29 @@ def _project_tree_row(r: dict) -> dict:
 
 
 def _project_tree_inputs(
-    db, session_limit: int, *, include_discovered: bool
+    db, session_limit: int, *, include_discovered: bool, filesystem_local: bool = True,
 ) -> tuple[list[dict], list[dict], list[dict], str | None]:
     """Gather (sessions, projects, discovered_repos, active_id) for build_tree.
     ``include_discovered`` is the zero-session-repo overview tier; drill-in skips it (and
     the distinct-cwd scan + git probes) on that per-turn path."""
-    # compact_rows: selecting the system-prompt blob only to drop it costs tens of MB of reads.
     rows = db.list_sessions_rich(
         limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
         include_children=False, exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
         include_archived=False, compact_rows=True)
     sessions = [_project_tree_row(r) for r in rows]
-    # Parallel-warm the git cache so build_tree's resolver doesn't cold-probe each cwd in turn.
-    git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
+    if filesystem_local:
+        git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
     from hermes_cli import projects_db as pdb
     policy = _repo_discovery_policy()
     policy_key = _repo_discovery_policy_key(policy)
     with pdb.connect_closing() as conn:
-        if include_discovered:
+        if include_discovered and filesystem_local:
             pdb.reconcile_discovered_repos_policy(
                 conn, policy_key, preserve_unversioned=_repo_discovery_policy_is_default(policy))
         projects = [p.to_dict() for p in pdb.list_projects(conn)]
         active_id = pdb.get_active_id(conn)
-        # backfill stays off the hot tree path — grouping uses the live resolver.
         discovered = []
-        if include_discovered:
+        if include_discovered and filesystem_local:
             discovered = _discover_repos_payload(
                 db, conn=conn, backfill=False, include_cached=policy["enabled"])
     return sessions, projects, discovered, active_id
@@ -379,16 +466,21 @@ def _build_project_tree(
     """Gather inputs and run the one authoritative builder. Returns (tree, active_id)."""
     from tui_gateway import project_tree
     _DIR_EXISTS_CACHE.clear()
+    filesystem_local = _project_filesystem_is_local()
     sessions, projects, discovered, active_id = _project_tree_inputs(
-        db, session_limit, include_discovered=include_discovered)
-    # build_tree also resolves declared project folders and discovered roots — warm them too.
-    git_probe.warm_roots(
-        [str(f.get("path") or "") for p in projects for f in (p.get("folders") or [])]
-        + [str(r.get("root") or "") for r in discovered])
+        db, session_limit, include_discovered=include_discovered,
+        filesystem_local=filesystem_local)
+    if filesystem_local:
+        git_probe.warm_roots(
+            [str(f.get("path") or "") for p in projects for f in (p.get("folders") or [])]
+            + [str(r.get("root") or "") for r in discovered])
+    junk_root = _is_repo_junk if filesystem_local else _is_backend_cwd_junk
+    junk_cwd = _is_session_cwd_junk if filesystem_local else _is_backend_cwd_junk
     tree = project_tree.build_tree(
-        projects, sessions, discovered, git_probe.resolve, preview_limit=preview_limit,
-        hydrate=hydrate, is_junk_root=_is_repo_junk, is_junk_cwd=_is_session_cwd_junk,
-        exists=_dir_exists_cached)
+        projects, sessions, discovered,
+        git_probe.resolve if filesystem_local else (lambda _path: None), preview_limit=preview_limit,
+        hydrate=hydrate, is_junk_root=junk_root, is_junk_cwd=junk_cwd,
+        exists=_dir_exists_cached if filesystem_local else (lambda _path: True))
     return tree, active_id
 
 

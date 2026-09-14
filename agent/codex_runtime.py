@@ -383,8 +383,12 @@ def _ensure_codex_session(agent) -> None:
     """Lazily spawn one CodexAppServerSession per AIAgent (reused across turns, closed by the _cleanup hook)."""
     if getattr(agent, "_codex_session", None) is not None:
         return
-    from agent.runtime_cwd import resolve_agent_cwd
+    from agent.runtime_cwd import filesystem_is_local, resolve_agent_cwd
     from agent.transports.codex_app_server_session import CodexAppServerSession, _ServerRequestRouting
+    if not filesystem_is_local():
+        raise RuntimeError(
+            "codex app-server runtime is unavailable with a non-local terminal filesystem"
+        )
     # Approval callback: Hermes' standard prompt flow when a CLI thread installed one.
     approval_callback = None
     with suppress(Exception):

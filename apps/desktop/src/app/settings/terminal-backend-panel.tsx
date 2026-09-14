@@ -88,6 +88,7 @@ export function TerminalBackendPanel({ onConfiguredChange }: TerminalBackendPane
             }
           : current
       )
+
       notify({ kind: 'success', title: copy.selectedTitle, message: copy.selectedMessage(backend.label) })
       onConfiguredChange?.()
     } catch (err) {

@@ -38,11 +38,16 @@ class TerminalEnvironmentProvider(ProviderBase):
       spawns so a model-authored command can never read them.
     * ``session_isolated_when_nonpersistent`` — non-persistent mode gives each session its own
       sandbox identity; opt in when a shared name would let two ephemeral runs destroy each other.
+    * ``filesystem_local`` — the environment addresses the controller filesystem. It is
+      declarative so path-entry UIs can query it without creating an environment. Providers
+      must opt in with a literal boolean; the inherited ``None`` is unknown and fails closed.
     """
 
     is_remote: bool = True
     is_container: bool = True
     session_isolated_when_nonpersistent: bool = False
+
+    filesystem_local: bool | None = None
 
     @property
     def description(self) -> str:
@@ -100,4 +105,7 @@ class TerminalEnvironmentProvider(ProviderBase):
     ):
         """Create an execution environment (``BaseEnvironment`` duck type). MUST accept ``**kwargs`` and ignore
         unknown keys so the factory can evolve without breaking older plugins. ``task_id`` keys reuse/persistence;
-        ``container_config`` carries ``container_cpu/memory/disk/persistent`` when :attr:`is_container`."""
+        ``container_config`` carries ``container_cpu/memory/disk/persistent`` when :attr:`is_container`.
+        The returned object participates in the ``is_local`` filesystem capability contract. The
+        factory overwrites it from a literal-boolean provider declaration so live execution and
+        declarative UI metadata cannot disagree; malformed declarations fail closed to non-local."""

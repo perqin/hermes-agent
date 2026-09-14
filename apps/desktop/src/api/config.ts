@@ -1,3 +1,4 @@
+import { projectFilesystemConfigWritten } from '@/lib/project-filesystem-capability'
 import type {
   ConfigSchemaResponse,
   CustomEndpointsResponse,
@@ -90,25 +91,40 @@ export function getHermesConfigSchema(profile?: null | string): Promise<ConfigSc
   })
 }
 
-export function saveHermesConfig(config: HermesConfigRecord, profile?: null | string): Promise<{ ok: boolean }> {
-  return hermesApi<{ ok: boolean }>({
+export async function saveHermesConfig(config: HermesConfigRecord, profile?: null | string): Promise<{ ok: boolean }> {
+  const result = await hermesApi<{ ok: boolean }>({
     ...profileScoped(profile),
     path: '/api/config',
     method: 'PUT',
     body: { config }
   })
+
+  if (result.ok) {
+    projectFilesystemConfigWritten()
+  }
+
+  return result
 }
 
 /** Capability-scoped counterpart of saveHermesConfig — writes the config of
  *  the profile/connection the Capabilities scope selector points at (possibly
  *  on another registered gateway), mirroring getHermesConfigRecord. */
-export function saveHermesConfigRecord(config: HermesConfigRecord, profile?: ProfileScope): Promise<{ ok: boolean }> {
-  return window.hermesDesktop.api<{ ok: boolean }>({
+export async function saveHermesConfigRecord(
+  config: HermesConfigRecord,
+  profile?: ProfileScope
+): Promise<{ ok: boolean }> {
+  const result = await window.hermesDesktop.api<{ ok: boolean }>({
     ...capabilityScoped(profile),
     path: '/api/config',
     method: 'PUT',
     body: { config }
   })
+
+  if (result.ok) {
+    projectFilesystemConfigWritten()
+  }
+
+  return result
 }
 
 export function getEnvVars(profile?: null | string): Promise<Record<string, EnvVarInfo>> {

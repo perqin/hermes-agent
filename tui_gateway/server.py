@@ -169,12 +169,25 @@ _LONG_HANDLERS = frozenset({
     "process.list", "profiles.configure", "profiles.create", "profiles.describe", "profiles.get_asset",
     "profiles.list", "profiles.set_asset", "bot_relay.roster.sync", "bot_relay.outbox.drain",
     "bot_relay.deliver", "bot_relay.reply", "image.generate", "projects.discover_repos",
-    "projects.record_repos", "projects.for_cwd", "projects.tree", "projects.project_sessions",
+    "projects.record_repos", "projects.create", "projects.add_folder", "projects.remove_folder",
+    "projects.set_primary", "projects.for_cwd", "projects.tree", "projects.project_sessions",
     "setup.runtime_check", "setup.status", "voice.toggle", "voice.record", "voice.tts", "wake.start",
     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
-    "session.resume", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
+    "session.create", "session.resume", "session.workspace.move", "session.cwd.set",
+    "shell.exec", "skills.manage", "slash.exec",
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
 })
+
+_CWD_CONFIG_KEYS = frozenset({"cwd", "terminal.cwd", "workdir"})
+
+
+def _is_long_handler(method_name: str, params: object) -> bool:
+    """Only config writes that may execute in a terminal environment need the RPC pool."""
+    return method_name in _LONG_HANDLERS or (
+        method_name == "config.set"
+        and isinstance(params, dict)
+        and params.get("key") in _CWD_CONFIG_KEYS
+    )
 
 _rpc_pool_workers = max(2, env_int("HERMES_TUI_RPC_POOL_WORKERS", 8))
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=_rpc_pool_workers, thread_name_prefix="tui-rpc")
@@ -785,7 +798,7 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
         normalized = _normalize_request(req)
         if isinstance(normalized, dict):
             return normalized
-        if normalized[1] not in _LONG_HANDLERS:
+        if not _is_long_handler(normalized[1], normalized[2]):
             return handle_request(req)
         ctx = contextvars.copy_context()  # the pool worker must see the bound transport
 
@@ -1225,6 +1238,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             session_key=session_key, session_id=session_id, source=source,
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family, cwd=resolved,
+            filesystem_local=_session_filesystem_is_local(sess),
             ui_session_id=ui_session_id, cron_session="")
     return []
 
@@ -2067,7 +2081,9 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "yolo": yolo, "approval_mode": approval_mode,
         "tools": dict(mirror.get("tools") or {}) if isinstance(mirror.get("tools"), dict) else {},
         "skills": dict(mirror.get("skills") or {}) if isinstance(mirror.get("skills"), dict) else {},
-        "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd),
+        "cwd": cwd,
+        "branch": git_probe.branch(cwd) if _session_filesystem_is_local(session) else "",
+        "project": _project_info_for_cwd(cwd),
         "terminal_backend": _effective_terminal_backend(), "personality": str(personality or ""),
         "running": bool(sess.get("running")), "turn_started_at": _turn_started_at(session),
         "title": _session_live_title(sess, session_key) if session_key else "",
@@ -2345,13 +2361,16 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
 def _init_session(
     sid: str, key: str, agent, history: list, cols: int = 80, cwd: str | None = None,
     session_db=None, source: str | None = None, profile_home: str | None = None,
-    explicit_cwd: bool = False):
+    explicit_cwd: bool = False, filesystem_local: bool | None = None):
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
             "history_version": 0, "inflight_turn": None, "created_at": now, "last_active": now,
             "running": False, "attached_images": [], "image_counter": 0, "cwd": cwd or _completion_cwd(),
+            "filesystem_local": (
+                filesystem_local if type(filesystem_local) is bool
+                else _active_terminal_filesystem_is_local()),
             "explicit_cwd": bool(explicit_cwd), "cols": cols, "slash_worker": None,
             "show_reasoning": _load_show_reasoning(), "source": _resolve_session_source(source),
             "tool_progress_mode": _load_tool_progress_mode(), "edit_snapshots": {}, "tool_started_at": {},
@@ -2393,10 +2412,18 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
 # ── Methods: session ─────────────────────────────────────────────────
 
 
-def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "", profile: str | None = None) -> dict:
+def _lazy_resume_info(
+    cwd: str, *, model: str = "", provider: str = "", profile: str | None = None,
+    filesystem_local: bool | None = None,
+) -> dict:
     """session.info for a not-yet-built session (session.create's shape); tools/skills land with the deferred build."""
+    local = (
+        filesystem_local if type(filesystem_local) is bool
+        else _active_terminal_filesystem_is_local()
+    )
     return {
-        "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd),
+        "cwd": cwd, "branch": git_probe.branch(cwd) if local else "",
+        "project": _project_info_for_cwd(cwd),
         "model": model or _resolve_model(), "tools": {}, "skills": {}, "lazy": True,
         "desktop_contract": DESKTOP_BACKEND_CONTRACT, "profile_name": _response_profile_name(profile),
         **({"provider": provider} if provider else {}),
@@ -2408,13 +2435,16 @@ def _deferred_session_record(
     close_on_disconnect: bool = False, display_history_prefix: list | None = None,
     profile_home: Path | None = None, lazy: bool = False, model_override=None,
     resume_runtime_overrides: dict | None = None, todo_state: dict | None = None,
-    explicit_cwd: bool = False) -> dict:
+    explicit_cwd: bool = False, filesystem_local: bool | None = None) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold resume) — _init_session's shape minus the agent."""
     now = time.time()
     return {
         "agent": None, "agent_error": None, "agent_ready": threading.Event(), "attached_images": [],
         "close_on_disconnect": close_on_disconnect, "active_session_lease": lease, "cols": cols,
         "created_at": now, "cwd": cwd, "display_history_prefix": display_history_prefix or [],
+        "filesystem_local": (
+            filesystem_local if type(filesystem_local) is bool
+            else _active_terminal_filesystem_is_local()),
         "edit_snapshots": {}, "explicit_cwd": bool(explicit_cwd), "history": history,
         "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
         "inflight_turn": None, "last_active": now, "lazy": lazy, "model_override": model_override,
@@ -2436,7 +2466,10 @@ def _live_profile_matches(session: dict, profile_home) -> bool:
     ``profile_home`` is the launch profile's). ``_ANY_PROFILE`` disables the check."""
     if profile_home is _ANY_PROFILE:
         return True
-    return (session.get("profile_home") or None) == (str(profile_home) if profile_home else None)
+    from hermes_constants import hermes_home_key
+
+    return hermes_home_key(session.get("profile_home") or _hermes_home) == hermes_home_key(
+        profile_home or _hermes_home)
 
 
 def _claim_or_reuse_live(sid: str, session_key: str, record: dict, lease) -> tuple[str, dict] | None:
@@ -2650,7 +2683,9 @@ def _fallback_session_info(session: dict) -> dict:
     # above already follows.
     cwd = _session_cwd(session)
     return {
-        "cwd": cwd, "branch": git_probe.branch(cwd), "project": _project_info_for_cwd(cwd), "lazy": True,
+        "cwd": cwd,
+        "branch": git_probe.branch(cwd) if _session_filesystem_is_local(session) else "",
+        "project": _project_info_for_cwd(cwd), "lazy": True,
         "model": _resolve_model(), "skills": {}, "tools": {}, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
     }
 

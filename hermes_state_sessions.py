@@ -27,7 +27,20 @@ logger = logging.getLogger("hermes_state")
 def workspace_key(row: Dict[str, Any]) -> Optional[str]:
     """Workspace grouping key: git repo root, else cwd, else None (branch excluded: a checkout must not
     fragment history)."""
-    return (row.get("git_repo_root") or "").strip() or (row.get("cwd") or "").strip() or None
+    repo_root = str(row.get("git_repo_root") or "")
+    cwd = str(row.get("cwd") or "")
+    return (repo_root if repo_root.strip() else "") or (cwd if cwd.strip() else "") or None
+
+
+def _is_windows_path(path: str) -> bool:
+    from hermes_cli.path_style import is_windows_path_style
+
+    return is_windows_path_style(path)
+
+
+def _strip_path_separators(path: str) -> str:
+    stripped = path.rstrip("/\\") if _is_windows_path(path) else path.rstrip("/")
+    return stripped or path
 
 
 def _delegate_from_json(col: str = "model_config") -> str:
@@ -50,20 +63,22 @@ def _parse_model_config(raw: Any) -> Dict[str, Any]:
 
 
 def _cwd_prefix_clause(cwd_prefix: str) -> Tuple[str, List[str]]:
-    prefix = cwd_prefix.rstrip("/\\") or cwd_prefix
+    prefix = _strip_path_separators(cwd_prefix)
     # ``_``/``%`` are LIKE wildcards but ordinary path characters: unescaped, a
     # prefix also matches sibling directories. The ``=`` arm keeps the raw prefix.
     esc = _escape_like(prefix)
-    return (
-        "(s.cwd = ? OR s.cwd LIKE ? ESCAPE '\\' OR s.cwd LIKE ? ESCAPE '\\')",
-        [prefix, f"{esc}/%", f"{esc}\\\\%"],
-    )
+    clauses = ["s.cwd = ?", "s.cwd LIKE ? ESCAPE '\\'"]
+    params = [prefix, f"{esc}/%"]
+    if _is_windows_path(prefix):
+        clauses.append("s.cwd LIKE ? ESCAPE '\\'")
+        params.append(f"{esc}\\\\%")
+    return f"({' OR '.join(clauses)})", params
 
 
 def _workspace_key_clause(key: str) -> Tuple[str, List[str]]:
     """WHERE for ``workspace_key(row) == key``: git_repo_root equals ``key``, or (rows predating
     per-session git metadata) cwd is at/under ``key``."""
-    prefix = key.rstrip("/\\") or key
+    prefix = _strip_path_separators(key)
     cwd_clause, cwd_params = _cwd_prefix_clause(prefix)
     return (
         f"(s.git_repo_root = ? OR (COALESCE(s.git_repo_root, '') = '' AND {cwd_clause}))",

@@ -118,6 +118,7 @@ def set_session_vars(
     user_name: str = "", scope_id: str = "", session_key: str = "", session_id: str = "",
     message_id: str = "", profile: str = "", browser_control_principal: str = "",
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
+    filesystem_local: bool | None = None,
     ui_session_id: str = "", cron_session: Any = _UNSET, parent_chat_id: str = "",
     session_history_delivery: str | None = None,
 ) -> list:
@@ -141,6 +142,7 @@ def set_session_vars(
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
     tokens.append(_SESSION_HISTORY_DELIVERY.set(_UNSET if session_history_delivery is None else session_history_delivery))
     _runtime_cwd("set_session_cwd", cwd)
+    _runtime_cwd("set_session_filesystem_local", filesystem_local)
     return tokens
 
 

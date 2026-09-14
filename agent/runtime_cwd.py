@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 _UNSET: Any = object()
 
 _SESSION_CWD: ContextVar = ContextVar("HERMES_SESSION_CWD", default=_UNSET)
+_SESSION_FILESYSTEM_LOCAL: ContextVar = ContextVar(
+    "HERMES_SESSION_FILESYSTEM_LOCAL", default=_UNSET,
+)
 
 # The package/source root (<root>/agent/runtime_cwd.py). A backend launched from or
 # self-spawned into this tree (desktop default) must never let an os.getcwd() fallback
@@ -37,11 +40,21 @@ def _is_install_tree(p: Path) -> bool:
 
 def set_session_cwd(cwd: str | None) -> Token:
     """Pin the logical cwd for the current context."""
-    return _SESSION_CWD.set((cwd or "").strip())
+    raw = str(cwd or "")
+    return _SESSION_CWD.set(raw if raw.strip() else "")
 
 
 def clear_session_cwd() -> None:
     _SESSION_CWD.set("")
+    _SESSION_FILESYSTEM_LOCAL.set(_UNSET)
+
+
+def set_session_filesystem_local(filesystem_local: bool | None) -> Token:
+    """Pin cwd ownership for this context; malformed/unknown values remain fail-closed."""
+    value = _UNSET if filesystem_local is None else (
+        filesystem_local if type(filesystem_local) is bool else False
+    )
+    return _SESSION_FILESYSTEM_LOCAL.set(value)
 
 
 def scope_terminal_cwd() -> str:
@@ -58,7 +71,29 @@ def scope_terminal_cwd() -> str:
     return terminal_env("TERMINAL_CWD", "")
 
 
+def filesystem_is_local() -> bool:
+    """Provider-neutral terminal filesystem locality without creating an environment."""
+    pinned = _SESSION_FILESYSTEM_LOCAL.get()
+    if type(pinned) is bool:
+        return pinned
+    try:
+        from tools.terminal_scope import terminal_env
+        from tools.terminal_tool_backends import terminal_filesystem_scope
+
+        return terminal_filesystem_scope(terminal_env("TERMINAL_ENV", "local")) == "local"
+    except ImportError:
+        return True
+
+
+def _filesystem_is_local() -> bool:
+    """Compatibility seam for older callers/tests; new consumers use the public helper."""
+    return filesystem_is_local()
+
+
 def _existing_dir(raw: str, label: str) -> Path | None:
+    if not _filesystem_is_local():
+        # Backend-owned canonical session paths must never be statted on the controller.
+        return Path(raw)
     p = Path(raw).expanduser()
     if p.is_dir():
         return p
@@ -72,13 +107,19 @@ def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
     ``override_is_final``: a set-but-missing session override yields None
     instead of falling through to TERMINAL_CWD.
     """
+    local = _filesystem_is_local()
     override = _SESSION_CWD.get()
-    override = "" if override is _UNSET else str(override).strip()
+    if override is _UNSET:
+        override = ""
+    else:
+        override = str(override)
+        override = override.strip() if local else (override if override.strip() else "")
     if override:
         p = _existing_dir(override, "configured working directory")
         if p is not None or override_is_final:
             return p
-    raw = scope_terminal_cwd().strip()
+    raw = scope_terminal_cwd()
+    raw = raw.strip() if local else (raw if raw.strip() else "")
     return _existing_dir(raw, "TERMINAL_CWD") if raw else None
 
 

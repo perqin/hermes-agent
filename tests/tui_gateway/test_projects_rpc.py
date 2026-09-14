@@ -68,6 +68,18 @@ def test_for_cwd_is_a_long_handler():
     assert "projects.for_cwd" in server._LONG_HANDLERS
 
 
+def test_path_mutations_are_long_handlers_and_capability_is_provider_neutral():
+    for method in (
+        "projects.create", "projects.add_folder", "projects.remove_folder",
+        "projects.set_primary",
+    ):
+        assert method in server._LONG_HANDLERS
+
+    capability = _call("projects.capabilities")
+    assert capability == {"filesystem_scope": "local"}
+    assert "projects.capabilities" not in server._LONG_HANDLERS
+
+
 def test_repo_root_cache_does_not_freeze_a_not_yet_repo(monkeypatch):
     # We `git init` a new project's folder on first worktree; the cache must not
     # have frozen the pre-init "" result, or the main lane mislabels by basename.
@@ -209,6 +221,52 @@ def test_tree_build_warms_every_path_it_will_resolve(monkeypatch, tmp_path):
     assert str(repo) in warmed
 
 
+def test_project_tree_groups_remote_cwd_without_controller_path_or_git_probe(monkeypatch):
+    remote = "/remote/project"
+    project = {
+        "id": "p_remote", "slug": "remote", "name": "Remote", "folders": [
+            {"path": remote, "is_primary": True}],
+    }
+    session = {
+        "id": "s_remote", "cwd": remote + "/src", "title": "Remote session",
+        "started_at": 1, "last_active": 1,
+    }
+    unmatched = {
+        "id": "s_other", "cwd": "/remote/other", "title": "Other remote session",
+        "started_at": 2, "last_active": 2,
+    }
+    monkeypatch.setattr(server, "_project_filesystem_is_local", lambda: False)
+    monkeypatch.setattr(
+        server, "_project_tree_inputs",
+        lambda *_a, **_kw: ([session, unmatched], [project], [], None),
+    )
+    monkeypatch.setattr(
+        server.git_probe, "warm_roots",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("controller git warm called")),
+    )
+    monkeypatch.setattr(
+        server.git_probe, "resolve",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("controller git resolve called")),
+    )
+    monkeypatch.setattr(
+        server.os.path, "isdir",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("controller isdir called")),
+    )
+    monkeypatch.setattr(
+        server.os.path, "realpath",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("controller realpath called")),
+    )
+
+    tree, _active = server._build_project_tree(
+        object(), preview_limit=3, hydrate=True, session_limit=5,
+        include_discovered=False)
+
+    remote_node = next(node for node in tree["projects"] if node["id"] == "p_remote")
+    other_node = next(node for node in tree["projects"] if node["id"] == "/remote/other")
+    assert remote_node["sessionCount"] == 1
+    assert other_node["repos"][0]["groups"][0]["sessions"][0]["id"] == "s_other"
+
+
 def test_create_list_roundtrip(tmp_path):
     created = _call("projects.create", {"name": "Demo", "folders": [str(tmp_path)], "use": True})
     assert created["project"]["slug"] == "demo"
@@ -231,6 +289,84 @@ def test_add_folder_and_for_cwd(tmp_path):
     assert "branch" in resolved
 
 
+def test_rpc_preserves_posix_backslash_basenames_across_path_mutations(monkeypatch):
+    from hermes_cli import project_paths
+
+    primary = "/remote/primary\\"
+    secondary = "/remote/secondary\\"
+    mapping = {"primary": primary, "secondary": secondary}
+    monkeypatch.setattr(
+        project_paths,
+        "resolve_project_folders",
+        lambda paths, primary_path=None, **_kw: (
+            [mapping[path] for path in paths], mapping.get(primary_path) if primary_path else None),
+    )
+    monkeypatch.setattr(
+        project_paths,
+        "resolve_project_folder",
+        lambda path, **_kw: mapping[path],
+    )
+    monkeypatch.setattr(
+        project_paths,
+        "resolve_project_folder_reference",
+        lambda _project, path, **_kw: mapping.get(path, path),
+    )
+
+    project = _call(
+        "projects.create",
+        {"name": "RPC slash literals", "folders": ["primary", "secondary"]},
+    )["project"]
+    project = _call(
+        "projects.set_primary", {"id": project["id"], "path": secondary},
+    )["project"]
+    project = _call(
+        "projects.remove_folder", {"id": project["id"], "path": primary},
+    )["project"]
+
+    assert project["primary_path"] == secondary
+    assert [folder["path"] for folder in project["folders"]] == [secondary]
+
+
+def test_for_cwd_resolves_remote_alias_without_controller_git_probe(monkeypatch):
+    from hermes_cli import project_paths
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing() as conn:
+        pid = pdb.create_project(
+            conn, name="Remote Cwd", folders=["/remote/repo"], canonical_paths=True)
+
+    remote = type("RemoteEnvironment", (), {"is_local": False})()
+    monkeypatch.setattr(
+        "tools.terminal_tool.acquire_terminal_environment", lambda **_kw: remote)
+    seen = []
+
+    def _resolve(path, **_kwargs):
+        seen.append(path)
+        return "/remote/repo/src "
+
+    monkeypatch.setattr(project_paths, "resolve_project_folder", _resolve)
+    monkeypatch.setattr(
+        server.git_probe, "branch",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("controller git probe called")))
+
+    result = _call("projects.for_cwd", {"cwd": "../alias/src "})
+
+    assert seen == ["../alias/src "]
+    assert result["cwd"] == "/remote/repo/src "
+    assert result["project"]["id"] == pid
+    assert result["branch"] == ""
+
+
+def test_for_cwd_blank_returns_jsonrpc_success_envelope():
+    response = server._methods["projects.for_cwd"]("blank-id", {"cwd": "  "})
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": "blank-id",
+        "result": {"project": None, "branch": "", "cwd": ""},
+    }
+
+
 def test_project_info_for_cwd_returns_status_payload(tmp_path):
     # The status-surface resolver returns the owning project's identity for a
     # nested cwd — the shape the TUI status label + /status read.
@@ -247,6 +383,28 @@ def test_project_info_for_cwd_returns_status_payload(tmp_path):
         "name": "Repo",
         "primary_path": str(folder),
     }
+
+
+def test_project_workspace_callback_trusts_validated_nonlocal_path(monkeypatch):
+    session = {"session_key": "remote-session", "agent": None}
+    monkeypatch.setitem(server._sessions, "ui-session", session)
+    monkeypatch.setattr(
+        "tools.terminal_tool.acquire_terminal_environment",
+        lambda **_kw: type("RemoteEnvironment", (), {"is_local": False})(),
+    )
+    monkeypatch.setattr(
+        server.os.path, "isdir",
+        lambda *_a: (_ for _ in ()).throw(AssertionError("controller isdir called")),
+    )
+    monkeypatch.setattr(server, "_register_session_cwd", lambda *_a: None)
+    monkeypatch.setattr(server, "_persist_session_cwd_and_schedule_git_meta", lambda *_a: None)
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+
+    server._apply_project_workspace("remote-session", "/remote/canonical/repo", "Remote")
+
+    assert session["cwd"] == "/remote/canonical/repo"
+    assert session["explicit_cwd"] is True
+    assert session["filesystem_local"] is False
 
 
 def test_session_info_carries_project_for_owned_cwd(tmp_path):
@@ -721,6 +879,71 @@ def _cached_repo_labels(home: Path) -> list[str]:
 
     with pdb.connect_closing(home / "projects.db") as conn:
         return sorted(str(entry.get("label") or "") for entry in pdb.list_discovered_repos(conn))
+
+
+def test_project_mutation_and_capability_use_requested_profile_terminal_provider(monkeypatch, tmp_path):
+    import re
+
+    from agent import terminal_env_registry
+    from agent.terminal_env_provider import TerminalEnvironmentProvider
+    from hermes_constants import hermes_home_key
+    from hermes_cli import projects_db as pdb
+
+    launch_home = _profile_dir(tmp_path, "launch")
+    coder_home = _profile_dir(tmp_path, "coder")
+    (launch_home / "config.yaml").write_text("terminal:\n  backend: local\n", encoding="utf-8")
+    (coder_home / "config.yaml").write_text("terminal:\n  backend: rpc_remote\n", encoding="utf-8")
+    _bind_profiles(monkeypatch, tmp_path, {"default": launch_home, "coder": coder_home})
+
+    calls = []
+
+    class Environment:
+        is_local = False
+
+        def execute(self, command, **kwargs):
+            calls.append((command, kwargs))
+            marker = re.search(r"(__HERMES_PROJECT_PATH_[0-9a-f]+__)_BEGIN", command).group(1)
+            return {
+                "returncode": 0,
+                "output": f"{marker}_BEGIN\n/profile-b/repo\n{marker}_END\n",
+            }
+
+        def cleanup(self):
+            pass
+
+    class Provider(TerminalEnvironmentProvider):
+        name = "rpc_remote"
+        display_name = "RPC Remote"
+        filesystem_local = False
+
+        def is_available(self):
+            return True
+
+        def create_environment(self, **_kwargs):
+            return Environment()
+
+    provider = Provider()
+    scope = hermes_home_key(coder_home)
+    previous = terminal_env_registry.snapshot_registration("rpc_remote", scope=scope)
+    terminal_env_registry.register_provider(provider, scope=scope)
+    try:
+        with _serving_launch_profile(launch_home):
+            created = _call(
+                "projects.create", {"profile": "coder", "name": "Coder", "folders": ["repo"]})
+            coder_capability = _call("projects.capabilities", {"profile": "coder"})
+            launch_capability = _call("projects.capabilities")
+
+        assert created["project"]["primary_path"] == "/profile-b/repo"
+        assert calls
+        assert coder_capability == {"filesystem_scope": "non_local"}
+        assert launch_capability == {"filesystem_scope": "local"}
+        with pdb.connect_closing(coder_home / "projects.db") as conn:
+            assert pdb.get_project(conn, "coder").primary_path == "/profile-b/repo"
+        with pdb.connect_closing(launch_home / "projects.db") as conn:
+            assert pdb.list_projects(conn) == []
+    finally:
+        terminal_env_registry.restore_registration(
+            "rpc_remote", provider, previous, scope=scope)
 
 
 def test_projects_reads_are_scoped_to_the_requested_profile(monkeypatch, tmp_path):

@@ -793,6 +793,8 @@ hermes project <create|list|show|add-folder|remove-folder|rename|set-primary|use
 
 Projects are human-named workspaces that can span multiple folders / repos. They anchor desktop session grouping and, when bound to a kanban board, give tasks a deterministic worktree + branch convention. State is per-profile.
 
+Project folder paths belong to the active profile's terminal filesystem. With the local terminal backend, Hermes keeps the existing lexical normalization behavior: relative paths and `~` are expanded on the Hermes host, and the path does not have to exist when it is registered. With a non-local terminal environment, Hermes resolves the path inside that environment, requires it to be an existing directory, and stores the resulting physical absolute path. If remote resolution fails, the command exits without changing the Project.
+
 | Subcommand | Description |
 |------------|-------------|
 | `create` | Create a new project. |
@@ -806,6 +808,10 @@ Projects are human-named workspaces that can span multiple folders / repos. They
 | `archive` | Archive a project (recoverable). |
 | `restore` | Restore an archived project. |
 | `bind-board` | Bind a kanban board to this project. |
+
+`create` accepts zero or more positional folder paths and an optional `--primary <path>`. `add-folder` accepts `--label <label>` and `--primary`; the first folder is primary automatically. `remove-folder` and `set-primary` first recognize an exact stored canonical path, so a remote directory can still be removed from the Project after it disappears or becomes temporarily unreachable.
+
+Binding a Project to a board snapshots its canonical primary path as the board workspace. Every profile assigned work on that board must be configured to reach the same durable filesystem and canonical path. A worker that cannot reach or canonicalize the bound path is blocked before agent execution; matching terminal backend names alone is not proof that two profiles share a filesystem.
 
 ## `hermes webhook`
 
